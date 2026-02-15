@@ -1,26 +1,58 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 interface Stock {
   id?: number;
   symbol: string;
-  name: string;
   created_at?: string;
+}
+
+interface Quote {
+  price: number;
+  currency: string;
+  change: number;
+  changePercent: number;
 }
 
 function App() {
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [symbol, setSymbol] = useState('');
-  const [name, setName] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [quotes, setQuotes] = useState<Record<string, Quote | null>>({});
+  const [quotesLoading, setQuotesLoading] = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const API_URL = 'http://localhost:3000/api/stocks';
+
+  const fetchQuotes = async () => {
+    try {
+      setQuotesLoading(true);
+      const response = await fetch(`${API_URL}/quotes`);
+      const data = await response.json();
+      setQuotes(data);
+    } catch {
+      // Silently fail - quotes are not critical
+    } finally {
+      setQuotesLoading(false);
+    }
+  };
 
   // Charger les actions au démarrage
   useEffect(() => {
     fetchStocks();
   }, []);
+
+  // Rafraîchir les cours toutes les 60 secondes
+  useEffect(() => {
+    if (stocks.length > 0) {
+      fetchQuotes();
+      intervalRef.current = setInterval(fetchQuotes, 60000);
+    }
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [stocks]);
 
   const fetchStocks = async () => {
     try {
@@ -39,18 +71,17 @@ function App() {
     e.preventDefault();
     setError('');
 
-    if (!symbol.trim() || !name.trim()) {
-      setError('Le symbole et le nom sont requis');
+    if (!symbol.trim()) {
+      setError('Le symbole est requis');
       return;
     }
 
     try {
       if (editingId) {
-        // Mise à jour
         const response = await fetch(`${API_URL}/${editingId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol, name }),
+          body: JSON.stringify({ symbol }),
         });
 
         if (!response.ok) {
@@ -58,11 +89,10 @@ function App() {
           throw new Error(error.error);
         }
       } else {
-        // Création
         const response = await fetch(API_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol, name }),
+          body: JSON.stringify({ symbol }),
         });
 
         if (!response.ok) {
@@ -72,7 +102,6 @@ function App() {
       }
 
       setSymbol('');
-      setName('');
       setEditingId(null);
       fetchStocks();
     } catch (err: any) {
@@ -82,7 +111,6 @@ function App() {
 
   const handleEdit = (stock: Stock) => {
     setSymbol(stock.symbol);
-    setName(stock.name);
     setEditingId(stock.id || null);
   };
 
@@ -101,7 +129,6 @@ function App() {
 
   const handleCancel = () => {
     setSymbol('');
-    setName('');
     setEditingId(null);
     setError('');
   };
@@ -131,19 +158,6 @@ function App() {
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Nom de l'entreprise
-              </label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Apple Inc."
-              />
-            </div>
-
             {error && (
               <div className="text-red-600 text-sm">{error}</div>
             )}
@@ -170,8 +184,17 @@ function App() {
 
         {/* Liste des actions */}
         <div className="bg-white rounded-lg shadow overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
+          <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
             <h2 className="text-xl font-semibold">Mes Actions</h2>
+            {stocks.length > 0 && (
+              <button
+                onClick={fetchQuotes}
+                disabled={quotesLoading}
+                className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                {quotesLoading ? 'Chargement...' : 'Rafraîchir les cours'}
+              </button>
+            )}
           </div>
 
           {loading ? (
@@ -187,8 +210,8 @@ function App() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Symbole
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Nom
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Cours
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Date d'ajout
@@ -204,7 +227,23 @@ function App() {
                     <td className="px-6 py-4 whitespace-nowrap font-semibold text-blue-600">
                       {stock.symbol}
                     </td>
-                    <td className="px-6 py-4">{stock.name}</td>
+                    <td className="px-6 py-4 text-right">
+                      {quotesLoading && !quotes[stock.symbol] ? (
+                        <span className="text-gray-400">...</span>
+                      ) : quotes[stock.symbol] ? (
+                        <div>
+                          <span className="font-semibold">
+                            {quotes[stock.symbol]!.price.toLocaleString('fr-FR', { style: 'currency', currency: quotes[stock.symbol]!.currency })}
+                          </span>
+                          <div className={`text-sm ${quotes[stock.symbol]!.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                            {quotes[stock.symbol]!.change >= 0 ? '+' : ''}
+                            {quotes[stock.symbol]!.change.toFixed(2)} ({quotes[stock.symbol]!.changePercent.toFixed(2)}%)
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-gray-400">N/A</span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 text-sm text-gray-500">
                       {stock.created_at ? new Date(stock.created_at).toLocaleDateString('fr-FR') : '-'}
                     </td>

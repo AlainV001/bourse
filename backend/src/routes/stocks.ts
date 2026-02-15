@@ -4,6 +4,43 @@ import { Stock } from '../types/stock';
 
 const router = Router();
 
+// GET - Récupérer les cours de toutes les actions
+router.get('/quotes', async (req: Request, res: Response) => {
+  try {
+    const stocks = db.prepare('SELECT symbol FROM stocks').all() as Stock[];
+    const symbols = stocks.map(s => s.symbol);
+
+    if (symbols.length === 0) {
+      return res.json({});
+    }
+
+    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number } | null> = {};
+
+    const YF = require('yahoo-finance2').default;
+    const yf = new YF({ suppressNotices: ['yahooSurvey'] });
+
+    await Promise.all(
+      symbols.map(async (symbol) => {
+        try {
+          const result: any = await yf.quote(symbol);
+          quotes[symbol] = {
+            price: result.regularMarketPrice ?? 0,
+            currency: result.currency ?? 'USD',
+            change: result.regularMarketChange ?? 0,
+            changePercent: result.regularMarketChangePercent ?? 0,
+          };
+        } catch {
+          quotes[symbol] = null;
+        }
+      })
+    );
+
+    res.json(quotes);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors de la récupération des cours' });
+  }
+});
+
 // GET - Récupérer toutes les actions
 router.get('/', (req: Request, res: Response) => {
   try {
@@ -33,14 +70,14 @@ router.get('/:id', (req: Request, res: Response) => {
 // POST - Créer une nouvelle action
 router.post('/', (req: Request, res: Response) => {
   try {
-    const { symbol, name } = req.body as Stock;
+    const { symbol } = req.body as Stock;
 
-    if (!symbol || !name) {
-      return res.status(400).json({ error: 'Le symbole et le nom sont requis' });
+    if (!symbol) {
+      return res.status(400).json({ error: 'Le symbole est requis' });
     }
 
-    const stmt = db.prepare('INSERT INTO stocks (symbol, name) VALUES (?, ?)');
-    const result = stmt.run(symbol.toUpperCase(), name);
+    const stmt = db.prepare('INSERT INTO stocks (symbol) VALUES (?)');
+    const result = stmt.run(symbol.toUpperCase());
 
     const newStock = db.prepare('SELECT * FROM stocks WHERE id = ?').get(result.lastInsertRowid);
     res.status(201).json(newStock);
@@ -56,14 +93,14 @@ router.post('/', (req: Request, res: Response) => {
 router.put('/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { symbol, name } = req.body as Stock;
+    const { symbol } = req.body as Stock;
 
-    if (!symbol || !name) {
-      return res.status(400).json({ error: 'Le symbole et le nom sont requis' });
+    if (!symbol) {
+      return res.status(400).json({ error: 'Le symbole est requis' });
     }
 
-    const stmt = db.prepare('UPDATE stocks SET symbol = ?, name = ? WHERE id = ?');
-    const result = stmt.run(symbol.toUpperCase(), name, id);
+    const stmt = db.prepare('UPDATE stocks SET symbol = ? WHERE id = ?');
+    const result = stmt.run(symbol.toUpperCase(), id);
 
     if (result.changes === 0) {
       return res.status(404).json({ error: 'Action non trouvée' });

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Application web de gestion d'actions boursières avec une architecture frontend/backend séparée.
 
-**Objectif actuel** : Gérer une liste d'actions (CRUD : Create, Read, Update, Delete)
+**Objectif actuel** : Gérer une liste d'actions (CRUD) avec affichage des cours en temps réel via Yahoo Finance.
 
 ## Stack technique
 
@@ -17,8 +17,9 @@ Application web de gestion d'actions boursières avec une architecture frontend/
 - Port par défaut : `5173` (dev)
 
 ### Backend
-- **Node.js** avec **Express** et **TypeScript**
+- **Node.js** avec **Express 5** et **TypeScript**
 - **SQLite** (better-sqlite3) pour la persistance
+- **yahoo-finance2** pour les cours boursiers en temps réel
 - **CORS** activé pour les requêtes cross-origin
 - Port par défaut : `3000`
 
@@ -26,7 +27,6 @@ Application web de gestion d'actions boursières avec une architecture frontend/
 - SQLite avec une table `stocks` :
   - `id` : INTEGER PRIMARY KEY AUTOINCREMENT
   - `symbol` : TEXT NOT NULL UNIQUE (symbole boursier en majuscules)
-  - `name` : TEXT NOT NULL (nom de l'entreprise)
   - `created_at` : DATETIME DEFAULT CURRENT_TIMESTAMP
 
 ## Structure du projet
@@ -35,7 +35,7 @@ Application web de gestion d'actions boursières avec une architecture frontend/
 Bourse/
 ├── frontend/                 # Application React
 │   ├── src/
-│   │   ├── App.tsx          # Composant principal avec gestion CRUD
+│   │   ├── App.tsx          # Composant principal avec gestion CRUD + cours
 │   │   ├── index.css        # Styles TailwindCSS
 │   │   └── main.tsx         # Point d'entrée
 │   ├── package.json
@@ -47,9 +47,9 @@ Bourse/
 │   ├── src/
 │   │   ├── index.ts         # Serveur Express principal
 │   │   ├── routes/
-│   │   │   └── stocks.ts    # Routes CRUD pour /api/stocks
+│   │   │   └── stocks.ts    # Routes CRUD + endpoint /quotes
 │   │   ├── database/
-│   │   │   └── db.ts        # Initialisation SQLite
+│   │   │   └── db.ts        # Initialisation SQLite + migrations
 │   │   └── types/
 │   │       └── stock.ts     # Interface TypeScript Stock
 │   ├── package.json
@@ -104,11 +104,12 @@ Base URL : `http://localhost:3000/api`
 ### Endpoints disponibles
 
 - `GET /api/stocks` - Récupérer toutes les actions
+- `GET /api/stocks/quotes` - Récupérer les cours de toutes les actions (via Yahoo Finance)
 - `GET /api/stocks/:id` - Récupérer une action par ID
 - `POST /api/stocks` - Créer une nouvelle action
-  - Body : `{ "symbol": "AAPL", "name": "Apple Inc." }`
+  - Body : `{ "symbol": "AAPL" }`
 - `PUT /api/stocks/:id` - Mettre à jour une action
-  - Body : `{ "symbol": "AAPL", "name": "Apple Inc." }`
+  - Body : `{ "symbol": "AAPL" }`
 - `DELETE /api/stocks/:id` - Supprimer une action
 - `GET /api/health` - Health check de l'API
 
@@ -120,7 +121,6 @@ Base URL : `http://localhost:3000/api`
   {
     "id": 1,
     "symbol": "AAPL",
-    "name": "Apple Inc.",
     "created_at": "2026-02-15 16:30:00"
   }
 ]
@@ -131,8 +131,20 @@ Base URL : `http://localhost:3000/api`
 {
   "id": 2,
   "symbol": "GOOGL",
-  "name": "Alphabet Inc.",
   "created_at": "2026-02-15 16:35:00"
+}
+```
+
+**GET /api/stocks/quotes**
+```json
+{
+  "AAPL": {
+    "price": 255.78,
+    "currency": "USD",
+    "change": -5.95,
+    "changePercent": -2.27
+  },
+  "GOOGL": null
 }
 ```
 
@@ -141,12 +153,15 @@ Base URL : `http://localhost:3000/api`
 ### Frontend (App.tsx)
 - **State management** : useState hooks pour l'état local
 - **Fetching** : Fetch API native (pas de bibliothèque externe pour le moment)
-- **Formulaire** : Gère à la fois la création et la modification (état `editingId`)
+- **Formulaire** : Champ symbole uniquement, gère création et modification (état `editingId`)
+- **Cours en temps réel** : Rafraîchissement automatique toutes les 60 secondes + bouton "Rafraîchir les cours"
+- **Affichage des cours** : Prix formaté avec devise, variation en vert (hausse) / rouge (baisse)
 - **UI** : Interface responsive avec TailwindCSS
 
 ### Backend
 - **Routes RESTful** : Organisation par ressource dans `src/routes/`
 - **Base de données** : Connexion SQLite synchrone avec better-sqlite3
+- **Yahoo Finance** : `yahoo-finance2` chargé en lazy (require dans le handler) pour compatibilité avec tsx/CJS
 - **Validation** : Validation basique des champs requis
 - **Gestion d'erreurs** :
   - 400 : Mauvaise requête (champs manquants)
@@ -157,8 +172,13 @@ Base URL : `http://localhost:3000/api`
 ### Conventions de code
 - **TypeScript strict mode** activé sur frontend et backend
 - **Symboles boursiers** : Toujours en MAJUSCULES (conversion automatique)
-- **Interface Stock** : Définie dans `backend/src/types/stock.ts`
+- **Interface Stock** : Définie dans `backend/src/types/stock.ts` (id, symbol, created_at)
 - **Nommage** : camelCase pour variables/fonctions, PascalCase pour composants/types
+
+### Notes techniques
+- **yahoo-finance2 v3** : Nécessite `new YahooFinance()` (instanciation). L'import ESM ne fonctionne pas avec tsx en mode CJS, utiliser `require('yahoo-finance2').default` à la place.
+- **Express 5** : La route `/quotes` doit être déclarée **avant** `/:id` dans le router pour éviter que le paramètre `:id` ne capture "quotes".
+- **Redémarrage backend** : Bien vérifier qu'aucun ancien processus ne reste accroché au port 3000 (`netstat -ano | grep 3000`).
 
 ## Tests automatisés
 
@@ -210,7 +230,6 @@ Les tests automatisés couvrent :
 
 L'architecture permet d'ajouter facilement :
 - Écrans personnalisables (widgets drag & drop)
-- Données en temps réel via API boursière externe
 - Graphiques et visualisations
 - Alertes de prix
 - Authentification utilisateur
@@ -219,6 +238,7 @@ L'architecture permet d'ajouter facilement :
 ## Notes importantes
 
 - Le fichier de base de données `database/stocks.db` est créé automatiquement au premier lancement du backend
+- La migration dans `db.ts` supprime automatiquement la colonne `name` si elle existe (migration one-shot)
 - Le backend doit être démarré **avant** le frontend pour que l'API soit disponible
 - CORS est configuré pour accepter toutes les origines en développement
 - Les symboles boursiers sont stockés en majuscules pour garantir l'unicité
