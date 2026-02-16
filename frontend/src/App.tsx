@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 
 interface Stock {
   id?: number;
@@ -11,6 +11,18 @@ interface Quote {
   currency: string;
   change: number;
   changePercent: number;
+  refreshed_at: string;
+  dailyTrend: number | null;
+}
+
+interface QuoteHistoryEntry {
+  id: number;
+  symbol: string;
+  price: number;
+  currency: string;
+  change: number;
+  change_percent: number;
+  refreshed_at: string;
 }
 
 function App() {
@@ -21,6 +33,10 @@ function App() {
   const [error, setError] = useState('');
   const [quotes, setQuotes] = useState<Record<string, Quote | null>>({});
   const [quotesLoading, setQuotesLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<string | null>(null);
+  const [historySymbol, setHistorySymbol] = useState<string | null>(null);
+  const [history, setHistory] = useState<QuoteHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const API_URL = 'http://localhost:3000/api/stocks';
@@ -31,6 +47,10 @@ function App() {
       const response = await fetch(`${API_URL}/quotes`);
       const data = await response.json();
       setQuotes(data);
+      const firstQuote = Object.values(data).find((q): q is Quote => q !== null);
+      if (firstQuote?.refreshed_at) {
+        setLastRefresh(firstQuote.refreshed_at);
+      }
     } catch {
       // Silently fail - quotes are not critical
     } finally {
@@ -43,11 +63,11 @@ function App() {
     fetchStocks();
   }, []);
 
-  // Rafraîchir les cours toutes les 60 secondes
+  // Rafraîchir les cours toutes les 10 minutes
   useEffect(() => {
     if (stocks.length > 0) {
       fetchQuotes();
-      intervalRef.current = setInterval(fetchQuotes, 60000);
+      intervalRef.current = setInterval(fetchQuotes, 600000);
     }
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -127,6 +147,25 @@ function App() {
     }
   };
 
+  const toggleHistory = async (sym: string) => {
+    if (historySymbol === sym) {
+      setHistorySymbol(null);
+      setHistory([]);
+      return;
+    }
+    try {
+      setHistoryLoading(true);
+      setHistorySymbol(sym);
+      const response = await fetch(`${API_URL}/quotes/history/${sym}`);
+      const data = await response.json();
+      setHistory(data);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   const handleCancel = () => {
     setSymbol('');
     setEditingId(null);
@@ -187,13 +226,20 @@ function App() {
           <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
             <h2 className="text-xl font-semibold">Mes Actions</h2>
             {stocks.length > 0 && (
-              <button
-                onClick={fetchQuotes}
-                disabled={quotesLoading}
-                className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-green-500"
-              >
-                {quotesLoading ? 'Chargement...' : 'Rafraîchir les cours'}
-              </button>
+              <div className="flex items-center gap-3">
+                {lastRefresh && (
+                  <span className="text-xs text-gray-400">
+                    Dernier refresh : {new Date(lastRefresh).toLocaleString('fr-FR')}
+                  </span>
+                )}
+                <button
+                  onClick={fetchQuotes}
+                  disabled={quotesLoading}
+                  className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-green-500"
+                >
+                  {quotesLoading ? 'Chargement...' : 'Rafraîchir les cours'}
+                </button>
+              </div>
             )}
           </div>
 
@@ -213,9 +259,6 @@ function App() {
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Cours
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Date d'ajout
-                  </th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Actions
                   </th>
@@ -223,9 +266,21 @@ function App() {
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {stocks.map((stock) => (
-                  <tr key={stock.id} className="hover:bg-gray-50">
+                  <Fragment key={stock.id}>
+                  <tr className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap font-semibold text-blue-600">
                       {stock.symbol}
+                      {quotes[stock.symbol]?.dailyTrend != null && Math.abs(quotes[stock.symbol]!.dailyTrend!) >= 3 && (
+                        <span
+                          className={`ml-2 text-xs font-bold px-1.5 py-0.5 rounded ${
+                            quotes[stock.symbol]!.dailyTrend! >= 0
+                              ? 'bg-green-100 text-green-700'
+                              : 'bg-red-100 text-red-700'
+                          }`}
+                        >
+                          {quotes[stock.symbol]!.dailyTrend! >= 0 ? '+' : ''}{quotes[stock.symbol]!.dailyTrend!.toFixed(1)}%
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-right">
                       {quotesLoading && !quotes[stock.symbol] ? (
@@ -244,10 +299,13 @@ function App() {
                         <span className="text-gray-400">N/A</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-500">
-                      {stock.created_at ? new Date(stock.created_at).toLocaleDateString('fr-FR') : '-'}
-                    </td>
                     <td className="px-6 py-4 text-right space-x-2">
+                      <button
+                        onClick={() => toggleHistory(stock.symbol)}
+                        className="text-gray-600 hover:text-gray-800 font-medium"
+                      >
+                        {historySymbol === stock.symbol ? 'Fermer' : 'Historique'}
+                      </button>
                       <button
                         onClick={() => handleEdit(stock)}
                         className="text-blue-600 hover:text-blue-800 font-medium"
@@ -262,6 +320,43 @@ function App() {
                       </button>
                     </td>
                   </tr>
+                  {historySymbol === stock.symbol && (
+                    <tr>
+                      <td colSpan={3} className="px-6 py-4 bg-gray-50">
+                        {historyLoading ? (
+                          <div className="text-center text-gray-500 text-sm">Chargement...</div>
+                        ) : history.length === 0 ? (
+                          <div className="text-center text-gray-400 text-sm">Aucun historique disponible</div>
+                        ) : (
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="text-gray-500 text-xs uppercase">
+                                <th className="py-1 text-left">Date</th>
+                                <th className="py-1 text-right">Prix</th>
+                                <th className="py-1 text-right">Variation</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-200">
+                              {history.map((entry) => (
+                                <tr key={entry.id}>
+                                  <td className="py-1 text-gray-600">
+                                    {new Date(entry.refreshed_at).toLocaleString('fr-FR')}
+                                  </td>
+                                  <td className="py-1 text-right font-medium">
+                                    {entry.price.toLocaleString('fr-FR', { style: 'currency', currency: entry.currency || 'USD' })}
+                                  </td>
+                                  <td className={`py-1 text-right ${entry.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                    {entry.change >= 0 ? '+' : ''}{entry.change.toFixed(2)} ({entry.change_percent.toFixed(2)}%)
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

@@ -14,21 +14,61 @@ router.get('/quotes', async (req: Request, res: Response) => {
       return res.json({});
     }
 
-    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number } | null> = {};
+    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number; refreshed_at: string; dailyTrend: number | null } | null> = {};
 
     const YF = require('yahoo-finance2').default;
     const yf = new YF({ suppressNotices: ['yahooSurvey'] });
+
+    const refreshedAt = new Date().toISOString();
+    const today = refreshedAt.slice(0, 10); // YYYY-MM-DD
+
+    const insertHistory = db.prepare(
+      'INSERT INTO quote_history (symbol, price, currency, change, change_percent, refreshed_at) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+
+    const getPricesToday = db.prepare(
+      'SELECT price FROM quote_history WHERE symbol = ? AND refreshed_at >= ? ORDER BY refreshed_at ASC'
+    );
 
     await Promise.all(
       symbols.map(async (symbol) => {
         try {
           const result: any = await yf.quote(symbol);
-          quotes[symbol] = {
-            price: result.regularMarketPrice ?? 0,
-            currency: result.currency ?? 'USD',
-            change: result.regularMarketChange ?? 0,
-            changePercent: result.regularMarketChangePercent ?? 0,
-          };
+          const price = result.regularMarketPrice ?? 0;
+          const currency = result.currency ?? 'USD';
+          const change = result.regularMarketChange ?? 0;
+          const changePercent = result.regularMarketChangePercent ?? 0;
+
+          insertHistory.run(symbol, price, currency, change, changePercent, refreshedAt);
+
+          // Calculer la tendance : plus longue séquence consécutive de hausses ou baisses du jour
+          let dailyTrend: number | null = null;
+          const pricesToday = getPricesToday.all(symbol, today + 'T00:00:00') as { price: number }[];
+
+          if (pricesToday.length >= 2) {
+            // Trouver la séquence consécutive la plus significative (qui se termine au prix actuel)
+            let currentStart = pricesToday.length - 2;
+            const lastPrice = pricesToday[pricesToday.length - 1].price;
+            const prevPrice = pricesToday[pricesToday.length - 2].price;
+            const currentDirection = lastPrice >= prevPrice ? 1 : -1;
+
+            // Remonter tant que la direction est la même
+            for (let i = pricesToday.length - 2; i >= 1; i--) {
+              const dir = pricesToday[i].price >= pricesToday[i - 1].price ? 1 : -1;
+              if (dir === currentDirection) {
+                currentStart = i - 1;
+              } else {
+                break;
+              }
+            }
+
+            const startPrice = pricesToday[currentStart].price;
+            if (startPrice > 0) {
+              dailyTrend = ((lastPrice - startPrice) / startPrice) * 100;
+            }
+          }
+
+          quotes[symbol] = { price, currency, change, changePercent, refreshed_at: refreshedAt, dailyTrend };
         } catch {
           quotes[symbol] = null;
         }
@@ -38,6 +78,19 @@ router.get('/quotes', async (req: Request, res: Response) => {
     res.json(quotes);
   } catch (error) {
     res.status(500).json({ error: 'Erreur lors de la récupération des cours' });
+  }
+});
+
+// GET - Récupérer l'historique des cours pour un symbole
+router.get('/quotes/history/:symbol', (req: Request, res: Response) => {
+  try {
+    const symbol = req.params.symbol as string;
+    const history = db.prepare(
+      'SELECT * FROM quote_history WHERE symbol = ? ORDER BY refreshed_at DESC'
+    ).all(symbol.toUpperCase());
+    res.json(history);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors de la récupération de l\'historique' });
   }
 });
 

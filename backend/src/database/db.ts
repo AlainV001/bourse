@@ -13,6 +13,19 @@ db.exec(`
   )
 `);
 
+// Créer la table quote_history pour stocker l'historique des cours
+db.exec(`
+  CREATE TABLE IF NOT EXISTS quote_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    price REAL NOT NULL,
+    currency TEXT,
+    change REAL,
+    change_percent REAL,
+    refreshed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
 // Migration : supprimer la colonne name si elle existe
 try {
   db.prepare('SELECT name FROM stocks LIMIT 1').get();

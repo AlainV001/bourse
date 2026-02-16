@@ -218,8 +218,10 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     // Vérifier que le tableau est visible avec toutes les colonnes
     await expect(page.getByRole('columnheader', { name: 'Symbole' })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: 'Cours' })).toBeVisible();
-    await expect(page.getByRole('columnheader', { name: 'Date d\'ajout' })).toBeVisible();
     await expect(page.getByRole('columnheader', { name: 'Actions' })).toBeVisible();
+
+    // Vérifier que la colonne "Date d'ajout" n'existe plus
+    await expect(page.getByRole('columnheader', { name: 'Date d\'ajout' })).not.toBeVisible();
 
     // Vérifier que le bouton Rafraîchir les cours est visible
     await expect(page.getByRole('button', { name: /Rafraîchir les cours/ })).toBeVisible();
@@ -321,10 +323,13 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
   });
 
   test('Test 13: Bouton Rafraîchir masqué quand la liste est vide', async ({ page, request }) => {
-    // Supprimer toutes les actions
+    // Sauvegarder les actions existantes (non-TEST)
     const response = await request.get(API_URL);
-    const stocks = await response.json();
-    for (const stock of stocks) {
+    const allStocks = await response.json();
+    const userStocks = allStocks.filter((s: any) => !s.symbol.startsWith('TEST'));
+
+    // Supprimer temporairement toutes les actions
+    for (const stock of allStocks) {
       await request.delete(`${API_URL}/${stock.id}`);
     }
 
@@ -334,6 +339,11 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     // Vérifier que le bouton Rafraîchir n'est pas visible
     await expect(page.getByText('Aucune action enregistrée. Ajoutez-en une ci-dessus !')).toBeVisible({ timeout: 15000 });
     await expect(page.getByRole('button', { name: /Rafraîchir les cours/ })).not.toBeVisible();
+
+    // Restaurer les actions utilisateur
+    for (const stock of userStocks) {
+      await request.post(API_URL, { data: { symbol: stock.symbol } });
+    }
   });
 
   test('Test 14: API /quotes retourne les cours correctement', async ({ request }) => {
@@ -356,8 +366,13 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
       expect(quotes['AAPL']).toHaveProperty('currency');
       expect(quotes['AAPL']).toHaveProperty('change');
       expect(quotes['AAPL']).toHaveProperty('changePercent');
+      expect(quotes['AAPL']).toHaveProperty('refreshed_at');
+      expect(quotes['AAPL']).toHaveProperty('dailyTrend');
       expect(typeof quotes['AAPL'].price).toBe('number');
       expect(quotes['AAPL'].price).toBeGreaterThan(0);
+      expect(typeof quotes['AAPL'].refreshed_at).toBe('string');
+      // dailyTrend est un nombre ou null
+      expect(quotes['AAPL'].dailyTrend === null || typeof quotes['AAPL'].dailyTrend === 'number').toBeTruthy();
     }
 
     // Vérifier que TESTAAPL retourne null (symbole inexistant sur Yahoo Finance)
@@ -374,11 +389,228 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     }
   });
 
-  test('Test 15: Affichage vide initial', async ({ page, request }) => {
-    // Supprimer toutes les actions (pas seulement TEST*)
+  test('Test 15: Affichage du dernier refresh près du bouton', async ({ page }) => {
+    await page.goto('/');
+
+    // Créer une action
+    await page.getByPlaceholder('AAPL').fill('TESTREFDT');
+    const createResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks') && response.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: 'Ajouter' }).click();
+    await createResponse;
+
+    // Attendre le chargement initial des cours
+    await page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes')
+    );
+
+    // Vérifier que le texte "Dernier refresh" apparaît près du bouton
+    await expect(page.getByText(/Dernier refresh/)).toBeVisible({ timeout: 15000 });
+  });
+
+  test('Test 16: Bouton Historique visible pour chaque action', async ({ page }) => {
+    await page.goto('/');
+
+    // Créer une action
+    await page.getByPlaceholder('AAPL').fill('TESTHIST1');
+    const createResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks') && response.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: 'Ajouter' }).click();
+    await createResponse;
+
+    await expect(page.locator('td', { hasText: 'TESTHIST1' }).first()).toBeVisible();
+
+    // Vérifier qu'un bouton Historique est présent sur la ligne
+    const row = page.getByRole('row', { name: /TESTHIST1/ });
+    await expect(row.getByRole('button', { name: 'Historique' })).toBeVisible();
+  });
+
+  test('Test 17: Ouvrir et fermer le panneau historique', async ({ page }) => {
+    await page.goto('/');
+
+    // Créer une action
+    await page.getByPlaceholder('AAPL').fill('TESTHIST2');
+    // Poser le listener quotes AVANT le click qui déclenche le fetch
+    const quotesResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes') && !response.url().includes('history')
+    );
+    const createResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks') && response.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: 'Ajouter' }).click();
+    await createResponse;
+    await quotesResponse;
+
+    await expect(page.locator('td', { hasText: 'TESTHIST2' }).first()).toBeVisible();
+
+    // Cliquer sur Historique et attendre la réponse API
+    const row = page.getByRole('row', { name: /TESTHIST2/ });
+    const historyResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes/history/TESTHIST2')
+    );
+    await row.getByRole('button', { name: 'Historique' }).click();
+    await historyResponse;
+
+    // Le bouton doit maintenant afficher "Fermer"
+    await expect(row.getByRole('button', { name: 'Fermer' })).toBeVisible();
+
+    // Un panneau d'historique doit s'afficher (sous-tableau ou message "Aucun historique")
+    const historyPanel = page.locator('td[colspan="3"]');
+    await expect(historyPanel).toBeVisible();
+
+    // Cliquer sur Fermer pour refermer le panneau
+    await row.getByRole('button', { name: 'Fermer' }).click();
+    await expect(historyPanel).not.toBeVisible();
+
+    // Le bouton doit revenir à "Historique"
+    await expect(row.getByRole('button', { name: 'Historique' })).toBeVisible();
+  });
+
+  test('Test 18: Historique affiche les données après un refresh de cours', async ({ page }) => {
+    await page.goto('/');
+
+    // Créer une action avec un vrai symbole
+    await page.getByPlaceholder('AAPL').fill('AAPL');
+    // Poser le listener quotes AVANT le click
+    const quotesResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes') && !response.url().includes('history')
+    );
+    const createResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks') && response.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: 'Ajouter' }).click();
+    await createResponse;
+    await quotesResponse;
+
+    // Ouvrir l'historique d'AAPL
+    const row = page.getByRole('row', { name: /AAPL/ }).first();
+    const historyResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes/history/AAPL')
+    );
+    await row.getByRole('button', { name: 'Historique' }).click();
+    await historyResponse;
+
+    // Vérifier que le sous-tableau d'historique contient des colonnes Date, Prix, Variation
+    const historyPanel = page.locator('td[colspan="3"]');
+    await expect(historyPanel.getByText('Date')).toBeVisible({ timeout: 10000 });
+    await expect(historyPanel.getByText('Prix')).toBeVisible();
+    await expect(historyPanel.getByText('Variation')).toBeVisible();
+
+    // Vérifier qu'au moins une ligne d'historique existe (avec un %)
+    await expect(historyPanel.locator('tbody tr').first()).toBeVisible();
+    await expect(historyPanel.locator('tbody tr').first()).toContainText('%');
+
+    // Nettoyage
+    await row.getByRole('button', { name: 'Fermer' }).click();
+    page.on('dialog', dialog => dialog.accept());
+    await page.getByRole('row', { name: /AAPL/ }).first().getByRole('button', { name: 'Supprimer' }).click();
+    await expect(page.locator('td', { hasText: 'AAPL' })).not.toBeVisible();
+  });
+
+  test('Test 19: API /quotes/history/:symbol retourne l\'historique', async ({ request }) => {
+    // Créer une action
+    await request.post(API_URL, { data: { symbol: 'TESTHAPI' } });
+
+    // Déclencher un refresh des cours pour générer de l'historique
+    await request.get(`${API_URL}/quotes`);
+
+    // Appeler l'endpoint historique
+    const histResp = await request.get(`${API_URL}/quotes/history/TESTHAPI`);
+    expect(histResp.ok()).toBeTruthy();
+
+    const history = await histResp.json();
+    expect(Array.isArray(history)).toBeTruthy();
+
+    // TESTHAPI est un faux symbole, donc pas d'entrée d'historique (null dans quotes)
+    // Vérifier que le endpoint retourne un tableau (vide pour un faux symbole)
+    expect(history.length).toBe(0);
+
+    // Nettoyage
+    const allStocks = await (await request.get(API_URL)).json();
+    for (const stock of allStocks) {
+      if (stock.symbol === 'TESTHAPI') {
+        await request.delete(`${API_URL}/${stock.id}`);
+      }
+    }
+  });
+
+  test('Test 20: API /quotes retourne dailyTrend après plusieurs refreshs', async ({ request }) => {
+    // Créer une action avec un vrai symbole
+    await request.post(API_URL, { data: { symbol: 'AAPL' } });
+
+    // Faire deux appels /quotes pour avoir au moins 2 points d'historique dans la journée
+    await request.get(`${API_URL}/quotes`);
+    const quotesResp = await request.get(`${API_URL}/quotes`);
+    expect(quotesResp.ok()).toBeTruthy();
+
+    const quotes = await quotesResp.json();
+
+    if (quotes['AAPL']) {
+      // Après 2 refreshs, dailyTrend doit être un nombre (pas null)
+      expect(typeof quotes['AAPL'].dailyTrend).toBe('number');
+    }
+
+    // Nettoyage : supprimer AAPL seulement si c'est un symbole de test
+    // (on ne supprime pas AAPL car l'utilisateur peut l'avoir)
+  });
+
+  test('Test 21: Pas de badge tendance pour un symbole sans historique suffisant', async ({ page }) => {
+    await page.goto('/');
+
+    // Créer une action fraîche
+    await page.getByPlaceholder('AAPL').fill('TESTTREND');
+    const quotesResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes') && !response.url().includes('history')
+    );
+    const createResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks') && response.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: 'Ajouter' }).click();
+    await createResponse;
+    await quotesResponse;
+
+    await expect(page.locator('td', { hasText: 'TESTTREND' }).first()).toBeVisible();
+
+    // Avec un seul refresh, pas de séquence possible → pas de badge
+    // Le badge a la classe .rounded et contient un %
+    const row = page.getByRole('row', { name: /TESTTREND/ });
+    const badge = row.locator('td').first().locator('span.rounded');
+    await expect(badge).not.toBeVisible();
+  });
+
+  test('Test 22: Badge tendance absent pour un symbole TEST inexistant (quote null)', async ({ page }) => {
+    await page.goto('/');
+
+    // Créer un symbole bidon
+    await page.getByPlaceholder('AAPL').fill('TESTNOQT');
+    const quotesResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks/quotes') && !response.url().includes('history')
+    );
+    const createResponse = page.waitForResponse(response =>
+      response.url().includes('/api/stocks') && response.request().method() === 'POST'
+    );
+    await page.getByRole('button', { name: 'Ajouter' }).click();
+    await createResponse;
+    await quotesResponse;
+
+    await expect(page.locator('td', { hasText: 'TESTNOQT' }).first()).toBeVisible();
+
+    // Symbole inexistant → quote null → aucun badge
+    const row = page.getByRole('row', { name: /TESTNOQT/ });
+    const badge = row.locator('td').first().locator('span.rounded');
+    await expect(badge).not.toBeVisible();
+  });
+
+  test('Test 23: Affichage vide initial', async ({ page, request }) => {
+    // Sauvegarder les actions existantes (non-TEST)
     const response = await request.get(API_URL);
-    const stocks = await response.json();
-    for (const stock of stocks) {
+    const allStocks = await response.json();
+    const userStocks = allStocks.filter((s: any) => !s.symbol.startsWith('TEST'));
+
+    // Supprimer temporairement toutes les actions
+    for (const stock of allStocks) {
       await request.delete(`${API_URL}/${stock.id}`);
     }
 
@@ -391,5 +623,10 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
 
     // Vérifier le message quand il n'y a pas d'actions
     await expect(page.getByText('Aucune action enregistrée. Ajoutez-en une ci-dessus !')).toBeVisible({ timeout: 15000 });
+
+    // Restaurer les actions utilisateur
+    for (const stock of userStocks) {
+      await request.post(API_URL, { data: { symbol: stock.symbol } });
+    }
   });
 });
