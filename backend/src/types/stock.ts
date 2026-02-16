@@ -13,3 +13,13 @@ export interface QuoteHistory {
   change_percent: number | null;
   refreshed_at?: string;
 }
+
+export interface DailyHistory {
+  id?: number;
+  symbol: string;
+  date: string;
+  open_price: number;
+  close_price: number;
+  currency: string | null;
+  day_change_percent: number | null;
+}

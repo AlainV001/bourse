@@ -25,10 +25,75 @@ interface QuoteHistoryEntry {
   refreshed_at: string;
 }
 
+interface DailyHistoryEntry {
+  id: number;
+  symbol: string;
+  date: string;
+  open_price: number;
+  close_price: number;
+  currency: string;
+  day_change_percent: number;
+}
+
+interface TrendSequence {
+  startDate: string;
+  endDate: string;
+  startPrice: number;
+  endPrice: number;
+  currency: string;
+  percent: number;
+  direction: 'up' | 'down';
+}
+
+function buildTrendSequences(entries: QuoteHistoryEntry[]): TrendSequence[] {
+  // entries are DESC, reverse to chronological order
+  const sorted = [...entries].reverse();
+  if (sorted.length < 2) return [];
+
+  const sequences: TrendSequence[] = [];
+  let seqStart = 0;
+  let currentDir: 'up' | 'down' = sorted[1].price >= sorted[0].price ? 'up' : 'down';
+
+  for (let i = 2; i < sorted.length; i++) {
+    const dir = sorted[i].price >= sorted[i - 1].price ? 'up' : 'down';
+    if (dir !== currentDir) {
+      // Close current sequence
+      const s = sorted[seqStart];
+      const e = sorted[i - 1];
+      sequences.push({
+        startDate: s.refreshed_at,
+        endDate: e.refreshed_at,
+        startPrice: s.price,
+        endPrice: e.price,
+        currency: e.currency || 'USD',
+        percent: s.price > 0 ? ((e.price - s.price) / s.price) * 100 : 0,
+        direction: currentDir,
+      });
+      seqStart = i - 1;
+      currentDir = dir;
+    }
+  }
+
+  // Close last sequence
+  const s = sorted[seqStart];
+  const e = sorted[sorted.length - 1];
+  sequences.push({
+    startDate: s.refreshed_at,
+    endDate: e.refreshed_at,
+    startPrice: s.price,
+    endPrice: e.price,
+    currency: e.currency || 'USD',
+    percent: s.price > 0 ? ((e.price - s.price) / s.price) * 100 : 0,
+    direction: currentDir,
+  });
+
+  return sequences.reverse(); // most recent first
+}
+
 function App() {
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [symbol, setSymbol] = useState('');
-  const [editingId, setEditingId] = useState<number | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [quotes, setQuotes] = useState<Record<string, Quote | null>>({});
@@ -37,6 +102,9 @@ function App() {
   const [historySymbol, setHistorySymbol] = useState<string | null>(null);
   const [history, setHistory] = useState<QuoteHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [dailySymbol, setDailySymbol] = useState<string | null>(null);
+  const [dailyHistory, setDailyHistory] = useState<DailyHistoryEntry[]>([]);
+  const [dailyLoading, setDailyLoading] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const API_URL = 'http://localhost:3000/api/stocks';
@@ -97,42 +165,24 @@ function App() {
     }
 
     try {
-      if (editingId) {
-        const response = await fetch(`${API_URL}/${editingId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol }),
-        });
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol }),
+      });
 
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error);
-        }
-      } else {
-        const response = await fetch(API_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol }),
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error);
-        }
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error);
       }
 
       setSymbol('');
-      setEditingId(null);
       fetchStocks();
     } catch (err: any) {
       setError(err.message || 'Erreur lors de l\'enregistrement');
     }
   };
 
-  const handleEdit = (stock: Stock) => {
-    setSymbol(stock.symbol);
-    setEditingId(stock.id || null);
-  };
 
   const handleDelete = async (id: number) => {
     if (!confirm('Êtes-vous sûr de vouloir supprimer cette action ?')) {
@@ -153,6 +203,9 @@ function App() {
       setHistory([]);
       return;
     }
+    // Fermer le panneau daily s'il est ouvert
+    setDailySymbol(null);
+    setDailyHistory([]);
     try {
       setHistoryLoading(true);
       setHistorySymbol(sym);
@@ -166,11 +219,28 @@ function App() {
     }
   };
 
-  const handleCancel = () => {
-    setSymbol('');
-    setEditingId(null);
-    setError('');
+  const toggleDailyHistory = async (sym: string) => {
+    if (dailySymbol === sym) {
+      setDailySymbol(null);
+      setDailyHistory([]);
+      return;
+    }
+    // Fermer le panneau historique s'il est ouvert
+    setHistorySymbol(null);
+    setHistory([]);
+    try {
+      setDailyLoading(true);
+      setDailySymbol(sym);
+      const response = await fetch(`${API_URL}/daily-history/${sym}`);
+      const data = await response.json();
+      setDailyHistory(data);
+    } catch {
+      setDailyHistory([]);
+    } finally {
+      setDailyLoading(false);
+    }
   };
+
 
   return (
     <div className="min-h-screen bg-gray-100 py-8 px-4">
@@ -180,7 +250,7 @@ function App() {
         {/* Formulaire */}
         <div className="bg-white rounded-lg shadow p-6 mb-8">
           <h2 className="text-xl font-semibold mb-4">
-            {editingId ? 'Modifier une action' : 'Ajouter une action'}
+            Ajouter une action
           </h2>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -206,17 +276,8 @@ function App() {
                 type="submit"
                 className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                {editingId ? 'Mettre à jour' : 'Ajouter'}
+                Ajouter
               </button>
-              {editingId && (
-                <button
-                  type="button"
-                  onClick={handleCancel}
-                  className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
-                >
-                  Annuler
-                </button>
-              )}
             </div>
           </form>
         </div>
@@ -307,11 +368,20 @@ function App() {
                         {historySymbol === stock.symbol ? 'Fermer' : 'Historique'}
                       </button>
                       <button
-                        onClick={() => handleEdit(stock)}
-                        className="text-blue-600 hover:text-blue-800 font-medium"
+                        onClick={() => toggleDailyHistory(stock.symbol)}
+                        className="text-purple-600 hover:text-purple-800 font-medium"
                       >
-                        Modifier
+                        {dailySymbol === stock.symbol ? 'Fermer J' : 'Historique J'}
                       </button>
+                      <a
+                        href={`https://www.google.com/search?q=${stock.symbol}+stock+news&tbm=nws`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-orange-600 hover:text-orange-800 font-medium"
+                      >
+                        News
+                      </a>
+
                       <button
                         onClick={() => handleDelete(stock.id!)}
                         className="text-red-600 hover:text-red-800 font-medium"
@@ -325,28 +395,81 @@ function App() {
                       <td colSpan={3} className="px-6 py-4 bg-gray-50">
                         {historyLoading ? (
                           <div className="text-center text-gray-500 text-sm">Chargement...</div>
-                        ) : history.length === 0 ? (
-                          <div className="text-center text-gray-400 text-sm">Aucun historique disponible</div>
+                        ) : (() => {
+                          const sequences = buildTrendSequences(history);
+                          return sequences.length === 0 ? (
+                            <div className="text-center text-gray-400 text-sm">Historique insuffisant pour détecter des tendances</div>
+                          ) : (
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="text-gray-500 text-xs uppercase">
+                                  <th className="py-1 text-left">Période</th>
+                                  <th className="py-1 text-right">Début</th>
+                                  <th className="py-1 text-center">→</th>
+                                  <th className="py-1 text-right">Fin</th>
+                                  <th className="py-1 text-right">Variation</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-200">
+                                {sequences.map((seq, i) => (
+                                  <tr key={i}>
+                                    <td className="py-1 text-gray-600">
+                                      {new Date(seq.startDate).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}
+                                      {' - '}
+                                      {new Date(seq.endDate).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}
+                                    </td>
+                                    <td className="py-1 text-right font-medium">
+                                      {seq.startPrice.toLocaleString('fr-FR', { style: 'currency', currency: seq.currency })}
+                                    </td>
+                                    <td className={`py-1 text-center ${seq.direction === 'up' ? 'text-green-600' : 'text-red-600'}`}>
+                                      {seq.direction === 'up' ? '↗' : '↘'}
+                                    </td>
+                                    <td className="py-1 text-right font-medium">
+                                      {seq.endPrice.toLocaleString('fr-FR', { style: 'currency', currency: seq.currency })}
+                                    </td>
+                                    <td className={`py-1 text-right font-bold ${seq.direction === 'up' ? 'text-green-600' : 'text-red-600'}`}>
+                                      {seq.percent >= 0 ? '+' : ''}{seq.percent.toFixed(2)}%
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  )}
+                  {dailySymbol === stock.symbol && (
+                    <tr>
+                      <td colSpan={3} className="px-6 py-4 bg-purple-50">
+                        {dailyLoading ? (
+                          <div className="text-center text-gray-500 text-sm">Chargement...</div>
+                        ) : dailyHistory.length === 0 ? (
+                          <div className="text-center text-gray-400 text-sm">Aucun historique journalier disponible</div>
                         ) : (
                           <table className="w-full text-sm">
                             <thead>
                               <tr className="text-gray-500 text-xs uppercase">
                                 <th className="py-1 text-left">Date</th>
-                                <th className="py-1 text-right">Prix</th>
-                                <th className="py-1 text-right">Variation</th>
+                                <th className="py-1 text-right">Ouverture</th>
+                                <th className="py-1 text-right">Clôture</th>
+                                <th className="py-1 text-right">Variation jour</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200">
-                              {history.map((entry) => (
+                              {dailyHistory.map((entry) => (
                                 <tr key={entry.id}>
                                   <td className="py-1 text-gray-600">
-                                    {new Date(entry.refreshed_at).toLocaleString('fr-FR')}
+                                    {new Date(entry.date + 'T00:00:00').toLocaleDateString('fr-FR')}
                                   </td>
                                   <td className="py-1 text-right font-medium">
-                                    {entry.price.toLocaleString('fr-FR', { style: 'currency', currency: entry.currency || 'USD' })}
+                                    {entry.open_price.toLocaleString('fr-FR', { style: 'currency', currency: entry.currency || 'USD' })}
                                   </td>
-                                  <td className={`py-1 text-right ${entry.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                    {entry.change >= 0 ? '+' : ''}{entry.change.toFixed(2)} ({entry.change_percent.toFixed(2)}%)
+                                  <td className="py-1 text-right font-medium">
+                                    {entry.close_price.toLocaleString('fr-FR', { style: 'currency', currency: entry.currency || 'USD' })}
+                                  </td>
+                                  <td className={`py-1 text-right font-bold ${entry.day_change_percent >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                    {entry.day_change_percent >= 0 ? '+' : ''}{entry.day_change_percent.toFixed(2)}%
                                   </td>
                                 </tr>
                               ))}

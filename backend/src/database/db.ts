@@ -26,6 +26,20 @@ db.exec(`
   )
 `);
 
+// Créer la table daily_history pour stocker l'historique journalier ouverture/fermeture
+db.exec(`
+  CREATE TABLE IF NOT EXISTS daily_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,
+    open_price REAL NOT NULL,
+    close_price REAL NOT NULL,
+    currency TEXT,
+    day_change_percent REAL,
+    UNIQUE(symbol, date)
+  )
+`);
+
 // Migration : supprimer la colonne name si elle existe
 try {
   db.prepare('SELECT name FROM stocks LIMIT 1').get();
