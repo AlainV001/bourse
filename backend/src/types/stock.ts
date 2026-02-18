@@ -2,6 +2,7 @@ export interface Stock {
   id?: number;
   symbol: string;
   created_at?: string;
+  important?: number;
 }
 
 export interface QuoteHistory {

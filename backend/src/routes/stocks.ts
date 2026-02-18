@@ -35,9 +35,10 @@ router.get('/quotes', async (req: Request, res: Response) => {
       'SELECT price FROM quote_history WHERE symbol = ? AND refreshed_at >= ? ORDER BY refreshed_at ASC'
     );
 
-    const hasOpenEntry = db.prepare(
+    const hasEntry = db.prepare(
       'SELECT COUNT(*) as cnt FROM quote_history WHERE symbol = ? AND refreshed_at = ?'
     );
+
 
     await Promise.all(
       symbols.map(async (symbol) => {
@@ -48,9 +49,12 @@ router.get('/quotes', async (req: Request, res: Response) => {
           const change = result.regularMarketChange ?? 0;
           const changePercent = result.regularMarketChangePercent ?? 0;
 
+          // Purger les entrées antérieures à aujourd'hui (seul le jour courant est conservé)
+          db.prepare('DELETE FROM quote_history WHERE symbol = ? AND refreshed_at < ?').run(symbol, today + 'T00:00:00');
+
           // Insérer le prix d'ouverture comme premier point du jour s'il n'existe pas encore
           const openPrice = result.regularMarketOpen ?? 0;
-          const { cnt } = hasOpenEntry.get(symbol, today + 'T00:00:00') as { cnt: number };
+          const { cnt } = hasEntry.get(symbol, today + 'T00:00:00') as { cnt: number };
           if (cnt === 0 && openPrice > 0) {
             insertHistory.run(symbol, openPrice, currency, 0, 0, today + 'T00:00:00');
           }
@@ -132,7 +136,7 @@ router.get('/daily-history/:symbol', (req: Request, res: Response) => {
 // GET - Récupérer toutes les actions
 router.get('/', (req: Request, res: Response) => {
   try {
-    const stocks = db.prepare('SELECT * FROM stocks ORDER BY created_at DESC').all();
+    const stocks = db.prepare('SELECT * FROM stocks ORDER BY symbol ASC').all();
     res.json(stocks);
   } catch (error) {
     res.status(500).json({ error: 'Erreur lors de la récupération des actions' });
@@ -152,6 +156,26 @@ router.get('/:id', (req: Request, res: Response) => {
     res.json(stock);
   } catch (error) {
     res.status(500).json({ error: 'Erreur lors de la récupération de l\'action' });
+  }
+});
+
+// PATCH - Basculer le flag important
+router.patch('/:id/important', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const stock = db.prepare('SELECT * FROM stocks WHERE id = ?').get(id) as Stock | undefined;
+
+    if (!stock) {
+      return res.status(404).json({ error: 'Action non trouvée' });
+    }
+
+    const newValue = stock.important ? 0 : 1;
+    db.prepare('UPDATE stocks SET important = ? WHERE id = ?').run(newValue, id);
+
+    const updatedStock = db.prepare('SELECT * FROM stocks WHERE id = ?').get(id);
+    res.json(updatedStock);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors de la mise à jour du flag important' });
   }
 });
 

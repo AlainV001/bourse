@@ -58,4 +58,11 @@ try {
   // La colonne n'existe pas, rien à faire
 }
 
+// Migration : ajouter la colonne important si elle n'existe pas
+try {
+  db.prepare('SELECT important FROM stocks LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE stocks ADD COLUMN important INTEGER DEFAULT 0');
+}
+
 export default db;
