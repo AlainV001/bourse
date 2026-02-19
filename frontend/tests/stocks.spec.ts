@@ -775,4 +775,293 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     }
   });
 
+  // ─── Modale Statistiques ────────────────────────────────────────────────────
+
+  test('Test 32: Bouton Statistiques visible pour chaque action', async ({ page }) => {
+    await page.goto('/');
+
+    await addStock(page, 'TESTSTAT1');
+    await expect(page.locator('td', { hasText: 'TESTSTAT1' }).first()).toBeVisible();
+
+    const row = page.getByRole('row', { name: /TESTSTAT1/ });
+    await expect(row.locator('button[title="Statistiques"]')).toBeVisible();
+  });
+
+  test('Test 33: Ouverture et fermeture de la modale Statistiques', async ({ page, request }) => {
+    await request.post(API_URL, { data: { symbol: 'TESTSTAT2' } });
+
+    await page.route('**/api/stocks/stats/TESTSTAT2', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ symbol: 'TESTSTAT2', dataPoints: 0, currency: null, ma5: null, ma20: null, ma50: null, high: null, low: null, highDate: null, lowDate: null })
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTSTAT2' }).first()).toBeVisible({ timeout: 10000 });
+
+    const row = page.getByRole('row', { name: /TESTSTAT2/ });
+
+    // Ouvrir la modale
+    const statsResp1 = page.waitForResponse(r => r.url().includes('/stats/TESTSTAT2'));
+    await row.locator('button[title="Statistiques"]').click();
+    await statsResp1;
+    await expect(page.locator('h2').filter({ hasText: /Statistiques/ })).toBeVisible();
+
+    // Fermer via le backdrop
+    await page.mouse.click(5, 5);
+    await expect(page.locator('h2').filter({ hasText: /Statistiques/ })).not.toBeVisible();
+
+    // Rouvrir et fermer via le bouton X
+    const statsResp2 = page.waitForResponse(r => r.url().includes('/stats/TESTSTAT2'));
+    await row.locator('button[title="Statistiques"]').click();
+    await statsResp2;
+    await expect(page.locator('h2').filter({ hasText: /Statistiques/ })).toBeVisible();
+
+    await page.locator('.fixed.inset-0 .bg-white').locator('button.text-gray-400').click();
+    await expect(page.locator('h2').filter({ hasText: /Statistiques/ })).not.toBeVisible();
+  });
+
+  test('Test 34: Modale Statistiques affiche MA, haut/bas et badge Au-dessus/En-dessous', async ({ page, request }) => {
+    await request.post(API_URL, { data: { symbol: 'TESTSTAT3' } });
+
+    // Mock quotes avant le goto pour que le prix soit disponible dans la modale
+    await page.route('**/api/stocks/quotes', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        TESTSTAT3: { price: 102, currency: 'USD', change: 1, changePercent: 0.99, refreshed_at: new Date().toISOString(), dailyTrend: null, name: 'TESTSTAT3' }
+      })
+    }));
+
+    await page.route('**/api/stocks/stats/TESTSTAT3', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        symbol: 'TESTSTAT3', currency: 'USD', dataPoints: 10,
+        ma5: 100.5, ma20: 98.2, ma50: null,
+        high: 110.0, highDate: '2026-01-15',
+        low: 85.0, lowDate: '2026-01-05',
+      })
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTSTAT3' }).first()).toBeVisible({ timeout: 10000 });
+
+    const row = page.getByRole('row', { name: /TESTSTAT3/ });
+    const statsResp = page.waitForResponse(r => r.url().includes('/stats/TESTSTAT3'));
+    await row.locator('button[title="Statistiques"]').click();
+    await statsResp;
+
+    const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: /Statistiques/ });
+    await expect(modal).toBeVisible();
+
+    // Lignes MA présentes
+    await expect(modal.getByText('MA5', { exact: true })).toBeVisible();
+    await expect(modal.getByText('MA20', { exact: true })).toBeVisible();
+    await expect(modal.getByText('MA50', { exact: true })).toBeVisible();
+
+    // Au moins un badge Au-dessus ou En-dessous (MA5 = 100.5 < prix 102 → Au-dessus)
+    await expect(modal.locator('span').filter({ hasText: /Au-dessus|En-dessous/ }).first()).toBeVisible();
+
+    // Plus haut et plus bas
+    await expect(modal.getByText('Plus haut')).toBeVisible();
+    await expect(modal.getByText('Plus bas')).toBeVisible();
+
+    // Note de bas de modale
+    await expect(modal.getByText(/Basé sur 10 jours/)).toBeVisible();
+  });
+
+  test('Test 35: API /stats/:symbol retourne la structure correcte', async ({ request }) => {
+    await request.post(API_URL, { data: { symbol: 'TESTSTAT4' } });
+
+    const statsResp = await request.get(`${API_URL}/stats/TESTSTAT4`);
+    expect(statsResp.ok()).toBeTruthy();
+
+    const stats = await statsResp.json();
+    expect(stats).toHaveProperty('symbol', 'TESTSTAT4');
+    expect(stats).toHaveProperty('dataPoints');
+    expect(stats).toHaveProperty('ma5');
+    expect(stats).toHaveProperty('ma20');
+    expect(stats).toHaveProperty('ma50');
+    expect(stats).toHaveProperty('high');
+    expect(stats).toHaveProperty('low');
+    // Symbole fictif sans historique → dataPoints = 0, toutes les MAs null
+    expect(stats.dataPoints).toBe(0);
+    expect(stats.ma5).toBeNull();
+    expect(stats.ma20).toBeNull();
+    expect(stats.ma50).toBeNull();
+
+    const allStocks = await (await request.get(API_URL)).json();
+    for (const stock of allStocks) {
+      if (stock.symbol === 'TESTSTAT4') await request.delete(`${API_URL}/${stock.id}`);
+    }
+  });
+
+  // ─── Modale Recommandations ──────────────────────────────────────────────────
+
+  test('Test 36: Bouton Recommandations visible quand des actions existent', async ({ page }) => {
+    await page.goto('/');
+
+    await addStock(page, 'TESTRECO1');
+    await expect(page.locator('td', { hasText: 'TESTRECO1' }).first()).toBeVisible();
+
+    await expect(page.locator('button[title="Recommandations basées sur les moyennes mobiles"]')).toBeVisible();
+  });
+
+  test('Test 37: Ouverture et fermeture de la modale Recommandations', async ({ page, request }) => {
+    await request.post(API_URL, { data: { symbol: 'TESTRECO2' } });
+
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { symbol: 'TESTRECO2', currency: null, dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' }
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTRECO2' }).first()).toBeVisible({ timeout: 10000 });
+
+    const recoBtn = page.locator('button[title="Recommandations basées sur les moyennes mobiles"]');
+
+    // Ouvrir via le bouton Reco
+    const recoResp1 = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await recoBtn.click();
+    await recoResp1;
+    await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).toBeVisible();
+
+    // Fermer via le backdrop
+    await page.mouse.click(5, 5);
+    await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).not.toBeVisible();
+
+    // Rouvrir et fermer via le bouton X
+    const recoResp2 = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await recoBtn.click();
+    await recoResp2;
+    await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).toBeVisible();
+
+    await page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' }).locator('button.text-gray-400').click();
+    await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).not.toBeVisible();
+  });
+
+  test('Test 38: Modale Recommandations affiche bandeau de synthèse et tableau', async ({ page, request }) => {
+    await request.post(API_URL, { data: { symbol: 'TESTRECO3' } });
+
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          symbol: 'TESTRECO3', currency: 'USD', dataPoints: 20, currentPrice: 105.0,
+          ma5: 100.0, ma20: 95.0, ma50: 90.0,
+          signal: 'buy', recommendedMA: 'MA5',
+          reason: 'MAs alignées à la hausse — tendance forte'
+        }
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTRECO3' }).first()).toBeVisible({ timeout: 10000 });
+
+    const recoBtn = page.locator('button[title="Recommandations basées sur les moyennes mobiles"]');
+    const recoResp = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await recoBtn.click();
+    await recoResp;
+
+    const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
+    await expect(modal).toBeVisible();
+
+    // Bandeau de synthèse : "1 achat" visible
+    await expect(modal.locator('span').filter({ hasText: /achat/ })).toBeVisible();
+
+    // En-têtes du tableau
+    await expect(modal.getByRole('columnheader', { name: 'Signal' })).toBeVisible();
+    await expect(modal.getByRole('columnheader', { name: 'MA Reco' })).toBeVisible();
+
+    // Ligne TESTRECO3 dans le tableau avec signal ACHAT et MA5
+    await expect(modal.locator('td').filter({ hasText: 'TESTRECO3' })).toBeVisible();
+    await expect(modal.getByText('ACHAT', { exact: true })).toBeVisible();
+    // MA5 dans la colonne MA Reco de la ligne TESTRECO3 (badge bleu)
+    const recoRow = modal.getByRole('row', { name: /TESTRECO3/ });
+    await expect(recoRow.locator('td').last().locator('span')).toContainText('MA5');
+
+    // Colonne "vs MA" avec flèches et pourcentages (prix 105 > ma5 100 → ↑ +5.0%)
+    await expect(modal.locator('td').filter({ hasText: /↑|↓/ }).first()).toBeVisible();
+  });
+
+  test('Test 39: API /recommendations retourne un tableau correctement structuré', async ({ request }) => {
+    await request.post(API_URL, { data: { symbol: 'TESTRECAPI' } });
+
+    const recoResp = await request.get(`${API_URL}/recommendations`);
+    expect(recoResp.ok()).toBeTruthy();
+
+    const recs = await recoResp.json();
+    expect(Array.isArray(recs)).toBeTruthy();
+
+    const rec = recs.find((r: any) => r.symbol === 'TESTRECAPI');
+    expect(rec).toBeDefined();
+    expect(rec).toHaveProperty('symbol', 'TESTRECAPI');
+    expect(rec).toHaveProperty('dataPoints');
+    expect(rec).toHaveProperty('currentPrice');
+    expect(rec).toHaveProperty('ma5');
+    expect(rec).toHaveProperty('ma20');
+    expect(rec).toHaveProperty('ma50');
+    expect(rec).toHaveProperty('signal');
+    expect(rec).toHaveProperty('recommendedMA');
+    expect(rec).toHaveProperty('reason');
+    // Symbole fictif sans historique
+    expect(rec.signal).toBe('insufficient');
+    expect(rec.dataPoints).toBe(0);
+    expect(rec.currentPrice).toBeNull();
+
+    const allStocks = await (await request.get(API_URL)).json();
+    for (const stock of allStocks) {
+      if (stock.symbol === 'TESTRECAPI') await request.delete(`${API_URL}/${stock.id}`);
+    }
+  });
+
+  test('Test 40: Modale Recommandations suit le filtre actif de la liste principale', async ({ page, request }) => {
+    const existing = await (await request.get(API_URL)).json();
+    for (const s of existing) {
+      if (s.symbol === 'TESTRECEUR' || s.symbol === 'TESTRECUSD') await request.delete(`${API_URL}/${s.id}`);
+    }
+    await request.post(API_URL, { data: { symbol: 'TESTRECEUR' } });
+    await request.post(API_URL, { data: { symbol: 'TESTRECUSD' } });
+
+    // Mock quotes : TESTRECEUR en EUR, TESTRECUSD en USD
+    await page.route('**/api/stocks/quotes', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        TESTRECEUR: { price: 130, currency: 'EUR', change: 0, changePercent: 0, refreshed_at: new Date().toISOString(), dailyTrend: null, name: 'TESTRECEUR' },
+        TESTRECUSD: { price: 150, currency: 'USD', change: 0, changePercent: 0, refreshed_at: new Date().toISOString(), dailyTrend: null, name: 'TESTRECUSD' },
+      })
+    }));
+
+    // Mock recommendations : retourne les deux actions
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { symbol: 'TESTRECEUR', currency: 'EUR', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' },
+        { symbol: 'TESTRECUSD', currency: 'USD', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' },
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTRECEUR' }).first()).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('td', { hasText: 'TESTRECUSD' }).first()).toBeVisible({ timeout: 10000 });
+    // Attendre que les prix mockés soient chargés (nécessaire pour que le filtre EUR fonctionne)
+    await expect(page.getByRole('row', { name: /TESTRECEUR/ }).locator('span.font-semibold')).toBeVisible({ timeout: 10000 });
+
+    // Appliquer le filtre EUR → TESTRECUSD disparaît de la liste
+    await page.getByRole('button', { name: '€ EUR' }).click();
+    await expect(page.locator('td', { hasText: 'TESTRECUSD' })).not.toBeVisible();
+
+    // Ouvrir la modale Recommandations
+    const recoResp = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await page.locator('button[title="Recommandations basées sur les moyennes mobiles"]').click();
+    await recoResp;
+
+    const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
+    await expect(modal).toBeVisible();
+
+    // Seul TESTRECEUR doit apparaître dans le tableau de la modale
+    await expect(modal.locator('td').filter({ hasText: 'TESTRECEUR' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRECUSD' })).not.toBeVisible();
+  });
+
 });

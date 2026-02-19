@@ -4,18 +4,72 @@ Tests end-to-end (E2E) automatisés avec **Playwright**.
 
 ## 🎯 Tests couverts
 
-### ✅ 10 scénarios de tests automatisés
+### ✅ 40 scénarios de tests automatisés
 
-1. **Création d'actions** - Ajouter des actions TEST* et vérifier leur affichage
-2. **Modification d'actions** - Modifier une action et vérifier la mise à jour
-3. **Validation des doublons** - Vérifier qu'on ne peut pas créer deux actions avec le même symbole
-4. **Validation des champs vides** - Tester la validation des champs obligatoires
-5. **Annulation de modification** - Vérifier le bouton "Annuler"
-6. **Suppression d'actions** - Supprimer une action avec confirmation
-7. **Conversion en majuscules** - Vérifier que les symboles sont automatiquement en CAPS
-8. **Persistance des données** - Vérifier que les données survivent au rechargement
-9. **Interface responsive** - Vérifier l'affichage des éléments
-10. **Affichage vide** - Vérifier le message quand il n'y a pas d'actions
+**Modale d'ajout (Tests 1-5)**
+1. Ouverture et fermeture de la modale d'ajout (X, Annuler, backdrop)
+2. Création de plusieurs actions via la modale
+3. Validation des doublons (symbole unique)
+4. Validation du champ vide
+5. Conversion automatique en majuscules
+
+**Suppression / Persistance (Tests 6-7)**
+6. Suppression d'actions avec confirmation
+7. Persistance des données après rechargement
+
+**Interface générale (Tests 8-9)**
+8. État vide, boutons présents/absents
+9. Colonnes du tableau (Symbole, Cours, Actions)
+
+**Cours en temps réel (Tests 10-15)**
+10. Affichage des cours pour un symbole réel (mock)
+11. Affichage N/A pour un symbole inexistant
+12. Bouton Rafraîchir les cours (icône)
+13. Affichage de la date du dernier refresh
+14. API /quotes — structure de la réponse
+15. API /quotes — dailyTrend après plusieurs refreshs
+
+**Historique intraday (Tests 16-19)**
+16. Bouton Historique visible par action
+17. Ouverture/fermeture du panneau intraday
+18. Affichage des séquences de tendance
+19. API /quotes/history/:symbol — structure
+
+**Badge tendance (Tests 20-21)**
+20. Pas de badge sans historique suffisant
+21. Badge absent pour un symbole inexistant
+
+**Historique journalier (Tests 22-27)**
+22. Bouton Historique J visible par action
+23. Ouverture/fermeture du panneau journalier
+24. API /daily-history/:symbol — structure
+25. Données affichées pour un symbole réel
+26. Un seul panneau ouvert à la fois
+27. Prix d'ouverture = premier point du jour
+
+**News / Étoile / Filtres (Tests 28-30)**
+28. Bouton News visible et lien correct
+29a. Étoile visible sur chaque ligne
+29b. Clic étoile bascule le statut important
+29c. Filtre étoile n'affiche que les importantes
+30a. Filtre EUR n'affiche que les actions en euros
+30b. Filtre USD n'affiche que les actions en dollars
+
+**État vide (Test 31)**
+31. Message d'état vide quand aucune action
+
+**Modale Statistiques (Tests 32-35)**
+32. Bouton Statistiques visible par action
+33. Ouverture/fermeture de la modale (backdrop et bouton X)
+34. Contenu : MA5/MA20/MA50, badges Au-dessus/En-dessous, Plus haut/bas, note de données
+35. API /stats/:symbol — structure et valeurs nulles sans historique
+
+**Modale Recommandations (Tests 36-40)**
+36. Bouton Recommandations visible quand des actions existent
+37. Ouverture/fermeture de la modale (backdrop et bouton X)
+38. Contenu : bandeau de synthèse, tableau avec signal et MA recommandée
+39. API /recommendations — structure et signal `insufficient` sans historique
+40. La modale suit le filtre actif de la liste principale (EUR/USD/importantes)
 
 ## 🚀 Lancer les tests
 

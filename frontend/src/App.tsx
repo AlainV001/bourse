@@ -14,6 +14,7 @@ interface Quote {
   changePercent: number;
   refreshed_at: string;
   dailyTrend: number | null;
+  name: string;
 }
 
 interface QuoteHistoryEntry {
@@ -34,6 +35,32 @@ interface DailyHistoryEntry {
   close_price: number;
   currency: string;
   day_change_percent: number;
+}
+
+interface Recommendation {
+  symbol: string;
+  currency: string | null;
+  dataPoints: number;
+  currentPrice: number | null;
+  ma5: number | null;
+  ma20: number | null;
+  ma50: number | null;
+  signal: 'buy' | 'sell' | 'caution' | 'insufficient';
+  recommendedMA: 'MA5' | 'MA20' | 'MA50' | null;
+  reason: string;
+}
+
+interface StockStats {
+  symbol: string;
+  currency: string;
+  dataPoints: number;
+  ma5: number | null;
+  ma20: number | null;
+  ma50: number | null;
+  high: number | null;
+  low: number | null;
+  highDate: string | null;
+  lowDate: string | null;
 }
 
 interface TrendSequence {
@@ -107,7 +134,14 @@ function App() {
   const [dailyHistory, setDailyHistory] = useState<DailyHistoryEntry[]>([]);
   const [dailyLoading, setDailyLoading] = useState(false);
   const [filter, setFilter] = useState<'all' | 'important' | 'eur' | 'usd'>('all');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc' | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [statsSymbol, setStatsSymbol] = useState<string | null>(null);
+  const [stats, setStats] = useState<StockStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [showRecommendations, setShowRecommendations] = useState(false);
+  const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const API_URL = 'http://localhost:3000/api/stocks';
@@ -234,12 +268,22 @@ function App() {
     }
   };
 
-  const filteredStocks = stocks.filter((stock) => {
-    if (filter === 'important') return stock.important === 1;
-    if (filter === 'eur') return quotes[stock.symbol]?.currency === 'EUR';
-    if (filter === 'usd') return quotes[stock.symbol]?.currency === 'USD';
-    return true;
-  });
+  const filteredStocks = stocks
+    .filter((stock) => {
+      if (filter === 'important') return stock.important === 1;
+      if (filter === 'eur') return quotes[stock.symbol]?.currency === 'EUR';
+      if (filter === 'usd') return quotes[stock.symbol]?.currency === 'USD';
+      return true;
+    })
+    .sort((a, b) => {
+      if (sortDir === null) return 0;
+      const qa = quotes[a.symbol]?.changePercent ?? null;
+      const qb = quotes[b.symbol]?.changePercent ?? null;
+      if (qa === null && qb === null) return 0;
+      if (qa === null) return 1;
+      if (qb === null) return -1;
+      return sortDir === 'asc' ? qa - qb : qb - qa;
+    });
 
   const toggleDailyHistory = async (sym: string) => {
     if (dailySymbol === sym) {
@@ -263,6 +307,34 @@ function App() {
     }
   };
 
+
+  const openStats = async (sym: string) => {
+    setStatsLoading(true);
+    setStatsSymbol(sym);
+    try {
+      const response = await fetch(`${API_URL}/stats/${sym}`);
+      const data = await response.json();
+      setStats(data);
+    } catch {
+      setStats(null);
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
+  const fetchRecommendations = async () => {
+    setRecommendationsLoading(true);
+    setShowRecommendations(true);
+    try {
+      const response = await fetch(`${API_URL}/recommendations`);
+      const data = await response.json();
+      setRecommendations(data);
+    } catch {
+      setRecommendations([]);
+    } finally {
+      setRecommendationsLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-100 py-2 px-4">
@@ -327,6 +399,243 @@ function App() {
           </div>
         )}
 
+        {/* Modale recommandations */}
+        {showRecommendations && (
+          <div
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+            onClick={() => setShowRecommendations(false)}
+          >
+            <div
+              className="bg-white rounded-lg shadow-xl p-6 w-full max-w-4xl mx-4 max-h-[90vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4 flex-shrink-0">
+                <h2 className="text-xl font-semibold flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-violet-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  Recommandations
+                </h2>
+                <button onClick={() => setShowRecommendations(false)} className="text-gray-400 hover:text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {recommendationsLoading ? (
+                <div className="text-center py-12 text-gray-500">Calcul en cours...</div>
+              ) : (() => {
+                const displayed = filteredStocks
+                  .map(s => recommendations.find(r => r.symbol === s.symbol))
+                  .filter((r): r is Recommendation => r !== undefined);
+
+                if (displayed.length === 0) return <div className="text-center py-12 text-gray-400">Aucune donnée disponible</div>;
+
+                const actionable = displayed.filter(r => r.signal !== 'insufficient');
+                const buys = actionable.filter(r => r.signal === 'buy').length;
+                const sells = actionable.filter(r => r.signal === 'sell').length;
+                const cautions = actionable.filter(r => r.signal === 'caution').length;
+
+                // Consensus MA
+                const maCounts: Record<string, number> = {};
+                actionable.forEach(r => { if (r.recommendedMA) maCounts[r.recommendedMA] = (maCounts[r.recommendedMA] ?? 0) + 1; });
+                const consensusMA = Object.entries(maCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
+                const maDescription: Record<string, string> = {
+                  MA5: 'court terme (5 jours) — réactive, idéale en tendance forte',
+                  MA20: 'moyen terme (20 jours) — référence équilibrée, tous marchés',
+                  MA50: 'long terme (50 jours) — filtre de tendance de fond',
+                };
+
+                const fmtPct = (current: number, ma: number) => {
+                  const pct = ((current - ma) / ma) * 100;
+                  return { pct, label: (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%', up: pct >= 0 };
+                };
+
+                return (
+                  <>
+                    {/* Bandeau de synthèse */}
+                    <div className="mb-4 p-3 bg-violet-50 border border-violet-200 rounded-lg flex-shrink-0">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex gap-2">
+                          {buys > 0 && <span className="text-sm font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded">{buys} achat{buys > 1 ? 's' : ''}</span>}
+                          {cautions > 0 && <span className="text-sm font-semibold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded">{cautions} prudence</span>}
+                          {sells > 0 && <span className="text-sm font-semibold text-red-700 bg-red-100 px-2 py-0.5 rounded">{sells} vente{sells > 1 ? 's' : ''}</span>}
+                        </div>
+                        {consensusMA && (
+                          <div className="text-sm text-violet-800">
+                            <span className="font-bold">MA recommandée : {consensusMA}</span>
+                            {maDescription[consensusMA] && <span className="text-violet-600 ml-1">— {maDescription[consensusMA]}</span>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Tableau */}
+                    <div className="overflow-auto flex-1">
+                      <table className="w-full text-sm">
+                        <thead className="sticky top-0 bg-white">
+                          <tr className="text-gray-500 text-xs uppercase border-b">
+                            <th className="py-2 text-left">Symbole</th>
+                            <th className="py-2 text-right">Prix réf.</th>
+                            <th className="py-2 text-right">vs MA5</th>
+                            <th className="py-2 text-right">vs MA20</th>
+                            <th className="py-2 text-right">vs MA50</th>
+                            <th className="py-2 text-center">Signal</th>
+                            <th className="py-2 text-center">MA Reco</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {displayed.map((r) => {
+                            const cur = r.currentPrice;
+                            const ccy = r.currency || 'USD';
+                            return (
+                              <tr key={r.symbol} className="hover:bg-gray-50" title={r.reason}>
+                                <td className="py-2 font-semibold text-blue-600">{r.symbol}</td>
+                                <td className="py-2 text-right text-gray-700">
+                                  {cur !== null
+                                    ? cur.toLocaleString('fr-FR', { style: 'currency', currency: ccy })
+                                    : <span className="text-gray-400">—</span>}
+                                </td>
+                                {([r.ma5, r.ma20, r.ma50] as (number | null)[]).map((ma, i) => {
+                                  if (cur === null || ma === null) return <td key={i} className="py-2 text-right text-gray-400">—</td>;
+                                  const { label, up } = fmtPct(cur, ma);
+                                  return (
+                                    <td key={i} className={`py-2 text-right font-medium ${up ? 'text-green-600' : 'text-red-600'}`}>
+                                      {up ? '↑' : '↓'} {label}
+                                    </td>
+                                  );
+                                })}
+                                <td className="py-2 text-center">
+                                  {r.signal === 'buy' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>}
+                                  {r.signal === 'sell' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>}
+                                  {r.signal === 'caution' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>}
+                                  {r.signal === 'insufficient' && <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">N/A</span>}
+                                </td>
+                                <td className="py-2 text-center">
+                                  {r.recommendedMA ? (
+                                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                      r.recommendedMA === 'MA5' ? 'bg-blue-100 text-blue-700' :
+                                      r.recommendedMA === 'MA20' ? 'bg-violet-100 text-violet-700' :
+                                      'bg-indigo-100 text-indigo-700'
+                                    }`}>{r.recommendedMA}</span>
+                                  ) : <span className="text-gray-400">—</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Légende */}
+                    <div className="mt-3 pt-3 border-t flex-shrink-0 text-xs text-gray-400 space-y-0.5">
+                      <p><span className="font-semibold text-blue-600">MA5</span> court terme · <span className="font-semibold text-violet-600">MA20</span> moyen terme · <span className="font-semibold text-indigo-600">MA50</span> long terme</p>
+                      <p>Le prix de référence est la dernière clôture enregistrée dans l'historique journalier. Survolez une ligne pour voir l'explication du signal.</p>
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* Modale statistiques */}
+        {statsSymbol && (
+          <div
+            className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+            onClick={() => { setStatsSymbol(null); setStats(null); }}
+          >
+            <div
+              className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold">
+                  Statistiques — {statsSymbol}
+                  {quotes[statsSymbol]?.name && quotes[statsSymbol]!.name !== statsSymbol && (
+                    <span className="ml-2 text-sm font-normal text-gray-500">{quotes[statsSymbol]!.name}</span>
+                  )}
+                </h2>
+                <button
+                  onClick={() => { setStatsSymbol(null); setStats(null); }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              {statsLoading ? (
+                <div className="text-center py-8 text-gray-500">Chargement...</div>
+              ) : !stats || stats.dataPoints === 0 ? (
+                <div className="text-center py-8 text-gray-400">Aucune donnée disponible</div>
+              ) : (
+                <>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-gray-500 text-xs uppercase border-b">
+                        <th className="py-2 text-left">Indicateur</th>
+                        <th className="py-2 text-right">Valeur</th>
+                        <th className="py-2 text-right">Position</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {([['MA5', stats.ma5], ['MA20', stats.ma20], ['MA50', stats.ma50]] as [string, number | null][]).map(([label, value]) => {
+                        const currentPrice = quotes[statsSymbol]?.price ?? null;
+                        const above = currentPrice !== null && value !== null ? currentPrice > value : null;
+                        return (
+                          <tr key={label}>
+                            <td className="py-2 font-medium text-gray-700">{label}</td>
+                            <td className="py-2 text-right">
+                              {value !== null
+                                ? value.toLocaleString('fr-FR', { style: 'currency', currency: stats.currency || 'USD' })
+                                : <span className="text-gray-400">—</span>}
+                            </td>
+                            <td className="py-2 text-right">
+                              {above === null ? (
+                                <span className="text-gray-400">—</span>
+                              ) : (
+                                <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${above ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                  {above ? 'Au-dessus' : 'En-dessous'}
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      <tr>
+                        <td className="py-2 font-medium text-gray-700">Plus haut</td>
+                        <td className="py-2 text-right font-semibold text-green-700">
+                          {stats.high !== null
+                            ? stats.high.toLocaleString('fr-FR', { style: 'currency', currency: stats.currency || 'USD' })
+                            : '—'}
+                        </td>
+                        <td className="py-2 text-right text-xs text-gray-400">
+                          {stats.highDate ? new Date(stats.highDate + 'T00:00:00').toLocaleDateString('fr-FR') : ''}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="py-2 font-medium text-gray-700">Plus bas</td>
+                        <td className="py-2 text-right font-semibold text-red-700">
+                          {stats.low !== null
+                            ? stats.low.toLocaleString('fr-FR', { style: 'currency', currency: stats.currency || 'USD' })
+                            : '—'}
+                        </td>
+                        <td className="py-2 text-right text-xs text-gray-400">
+                          {stats.lowDate ? new Date(stats.lowDate + 'T00:00:00').toLocaleDateString('fr-FR') : ''}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p className="mt-4 text-xs text-gray-400 text-right">Basé sur {stats.dataPoints} jour{stats.dataPoints > 1 ? 's' : ''} de données</p>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Liste des actions */}
         <div className="bg-white rounded-lg shadow overflow-hidden">
           <div className="px-4 py-2 border-b border-gray-200 flex items-center justify-between">
@@ -380,6 +689,17 @@ function App() {
                   </span>
                 )}
                 <button
+                  onClick={fetchRecommendations}
+                  disabled={recommendationsLoading}
+                  className="px-3 py-1.5 bg-violet-600 text-white text-sm rounded-md hover:bg-violet-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-violet-500 flex items-center gap-1"
+                  title="Recommandations basées sur les moyennes mobiles"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  Reco
+                </button>
+                <button
                   onClick={fetchQuotes}
                   disabled={quotesLoading}
                   className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-green-500"
@@ -413,7 +733,16 @@ function App() {
                     Symbole
                   </th>
                   <th className="px-4 py-1.5 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Cours
+                    <button
+                      onClick={() => setSortDir(d => d === 'desc' ? 'asc' : d === 'asc' ? null : 'desc')}
+                      className="inline-flex items-center gap-1 hover:text-gray-800"
+                      title="Trier par variation %"
+                    >
+                      Cours
+                      {sortDir === 'desc' && <span>↓</span>}
+                      {sortDir === 'asc' && <span>↑</span>}
+                      {sortDir === null && <span className="text-gray-300">↕</span>}
+                    </button>
                   </th>
                   <th className="px-4 py-1.5 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Actions
@@ -493,6 +822,24 @@ function App() {
                           </svg>
                         )}
                       </button>
+                      <button
+                        onClick={() => openStats(stock.symbol)}
+                        className="text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center"
+                        title="Statistiques"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                        </svg>
+                      </button>
+                      <a
+                        href={`https://www.bing.com/search?q=${encodeURIComponent((quotes[stock.symbol]?.name ?? stock.symbol) + ' quel marché boursier')}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-500 hover:text-blue-700 font-bold inline-flex items-center"
+                        title="Bing - Marché boursier"
+                      >
+                        B
+                      </a>
                       <a
                         href={`https://www.google.com/search?q=${stock.symbol}+stock+news&tbm=nws`}
                         target="_blank"

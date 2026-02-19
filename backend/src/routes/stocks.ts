@@ -14,7 +14,7 @@ router.get('/quotes', async (req: Request, res: Response) => {
       return res.json({});
     }
 
-    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number; refreshed_at: string; dailyTrend: number | null } | null> = {};
+    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number; refreshed_at: string; dailyTrend: number | null; name: string } | null> = {};
 
     const YF = require('yahoo-finance2').default;
     const yf = new YF({ suppressNotices: ['yahooSurvey'] });
@@ -48,15 +48,26 @@ router.get('/quotes', async (req: Request, res: Response) => {
           const currency = result.currency ?? 'USD';
           const change = result.regularMarketChange ?? 0;
           const changePercent = result.regularMarketChangePercent ?? 0;
+          const name = result.longName ?? result.shortName ?? symbol;
+
+          // Récupérer le dernier cours de la veille avant purge
+          const yesterdayClose = db.prepare(
+            'SELECT price, currency FROM quote_history WHERE symbol = ? AND refreshed_at < ? ORDER BY refreshed_at DESC LIMIT 1'
+          ).get(symbol, today + 'T00:00:00') as { price: number; currency: string } | undefined;
 
           // Purger les entrées antérieures à aujourd'hui (seul le jour courant est conservé)
           db.prepare('DELETE FROM quote_history WHERE symbol = ? AND refreshed_at < ?').run(symbol, today + 'T00:00:00');
 
-          // Insérer le prix d'ouverture comme premier point du jour s'il n'existe pas encore
+          // Insérer le premier point du jour s'il n'existe pas encore
+          // Priorité : clôture de la veille > prix d'ouverture Yahoo Finance
           const openPrice = result.regularMarketOpen ?? 0;
           const { cnt } = hasEntry.get(symbol, today + 'T00:00:00') as { cnt: number };
-          if (cnt === 0 && openPrice > 0) {
-            insertHistory.run(symbol, openPrice, currency, 0, 0, today + 'T00:00:00');
+          if (cnt === 0) {
+            const firstPrice = yesterdayClose?.price ?? openPrice;
+            const firstCurrency = yesterdayClose?.currency ?? currency;
+            if (firstPrice > 0) {
+              insertHistory.run(symbol, firstPrice, firstCurrency, 0, 0, today + 'T00:00:00');
+            }
           }
 
           insertHistory.run(symbol, price, currency, change, changePercent, refreshedAt);
@@ -94,7 +105,7 @@ router.get('/quotes', async (req: Request, res: Response) => {
             }
           }
 
-          quotes[symbol] = { price, currency, change, changePercent, refreshed_at: refreshedAt, dailyTrend };
+          quotes[symbol] = { price, currency, change, changePercent, refreshed_at: refreshedAt, dailyTrend, name };
         } catch {
           quotes[symbol] = null;
         }
@@ -130,6 +141,127 @@ router.get('/daily-history/:symbol', (req: Request, res: Response) => {
     res.json(history);
   } catch (error) {
     res.status(500).json({ error: 'Erreur lors de la récupération de l\'historique journalier' });
+  }
+});
+
+// GET - Statistiques (MA5, MA20, MA50, high/low)
+router.get('/stats/:symbol', (req: Request, res: Response) => {
+  try {
+    const symbol = (req.params.symbol as string).toUpperCase();
+    const entries = db.prepare(
+      'SELECT date, close_price, currency FROM daily_history WHERE symbol = ? ORDER BY date DESC LIMIT 50'
+    ).all(symbol) as { date: string; close_price: number; currency: string }[];
+
+    if (entries.length === 0) {
+      return res.json({ symbol, ma5: null, ma20: null, ma50: null, high: null, low: null, dataPoints: 0 });
+    }
+
+    const closes = entries.map(e => e.close_price);
+    const currency = entries[0].currency;
+
+    const ma = (n: number): number | null => {
+      if (closes.length < n) return null;
+      return closes.slice(0, n).reduce((a, b) => a + b, 0) / n;
+    };
+
+    const maxClose = Math.max(...closes);
+    const minClose = Math.min(...closes);
+
+    res.json({
+      symbol,
+      currency,
+      dataPoints: entries.length,
+      ma5: ma(5),
+      ma20: ma(20),
+      ma50: ma(50),
+      high: maxClose,
+      low: minClose,
+      highDate: entries.find(e => e.close_price === maxClose)?.date ?? null,
+      lowDate: entries.find(e => e.close_price === minClose)?.date ?? null,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors du calcul des statistiques' });
+  }
+});
+
+// GET - Recommandations pour toutes les actions (basé sur position prix vs MAs)
+router.get('/recommendations', (req: Request, res: Response) => {
+  try {
+    const stocks = db.prepare('SELECT symbol FROM stocks ORDER BY symbol ASC').all() as { symbol: string }[];
+
+    const results = stocks.map(({ symbol }) => {
+      const entries = db.prepare(
+        'SELECT date, close_price, currency FROM daily_history WHERE symbol = ? ORDER BY date DESC LIMIT 50'
+      ).all(symbol) as { date: string; close_price: number; currency: string }[];
+
+      if (entries.length === 0) {
+        return { symbol, dataPoints: 0, currentPrice: null, currency: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' };
+      }
+
+      const closes = entries.map(e => e.close_price);
+      const currency = entries[0].currency;
+      const currentPrice = closes[0];
+
+      const ma = (n: number): number | null => {
+        if (closes.length < n) return null;
+        return closes.slice(0, n).reduce((a, b) => a + b, 0) / n;
+      };
+
+      const ma5 = ma(5);
+      const ma20 = ma(20);
+      const ma50 = ma(50);
+
+      const aboveMA5 = ma5 !== null ? currentPrice > ma5 : null;
+      const aboveMA20 = ma20 !== null ? currentPrice > ma20 : null;
+      const aboveMA50 = ma50 !== null ? currentPrice > ma50 : null;
+
+      const validComparisons = [aboveMA5, aboveMA20, aboveMA50].filter(x => x !== null);
+      const aboveCount = validComparisons.filter(x => x === true).length;
+      const validCount = validComparisons.length;
+
+      const ma5AboveMA20 = ma5 !== null && ma20 !== null ? ma5 > ma20 : null;
+      const ma20AboveMA50 = ma20 !== null && ma50 !== null ? ma20 > ma50 : null;
+
+      let signal: string;
+      let recommendedMA: string | null;
+      let reason: string;
+
+      if (validCount === 0) {
+        signal = 'insufficient';
+        recommendedMA = null;
+        reason = 'Pas assez de données pour calculer les MAs';
+      } else if (aboveCount === validCount && ma5AboveMA20 === true && ma20AboveMA50 === true) {
+        signal = 'buy';
+        recommendedMA = 'MA5';
+        reason = 'MAs alignées à la hausse — tendance forte, MA5 idéale pour les entrées court terme';
+      } else if (aboveCount === validCount) {
+        signal = 'buy';
+        recommendedMA = 'MA20';
+        reason = 'Prix au-dessus de toutes les MAs mais alignement incomplet — MA20 comme référence';
+      } else if (aboveCount === 0 && ma5AboveMA20 === false && ma20AboveMA50 === false) {
+        signal = 'sell';
+        recommendedMA = 'MA5';
+        reason = 'MAs alignées à la baisse — tendance baissière forte, MA5 comme résistance à surveiller';
+      } else if (aboveCount === 0 && validCount > 0) {
+        signal = 'sell';
+        recommendedMA = 'MA20';
+        reason = 'Prix sous toutes les MAs calculées — pression vendeuse dominante';
+      } else if (aboveCount > validCount / 2) {
+        signal = 'caution';
+        recommendedMA = 'MA20';
+        reason = 'Tendance haussière partielle — MA20 comme support de référence';
+      } else {
+        signal = 'caution';
+        recommendedMA = 'MA20';
+        reason = 'Signaux mixtes — consolidation, MA20 comme pivot central';
+      }
+
+      return { symbol, currency, dataPoints: entries.length, currentPrice, ma5, ma20, ma50, signal, recommendedMA, reason };
+    });
+
+    res.json(results);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors du calcul des recommandations' });
   }
 });
 
