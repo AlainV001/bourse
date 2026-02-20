@@ -8,7 +8,10 @@
       "Bash(npx playwright test)",
       "Bash(npx playwright test:*)",
       "Bash(git add:*)",
-      "Bash(npm test:*)"
+      "Bash(npm test:*)",
+      "Bash(curl:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(sqlite3:*)"
     ]
   }
 }

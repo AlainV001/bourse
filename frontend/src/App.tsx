@@ -37,6 +37,17 @@ interface DailyHistoryEntry {
   day_change_percent: number;
 }
 
+interface Position {
+  id: number;
+  symbol: string;
+  quantity: number;
+  purchase_price: number;
+  type: 'real' | 'fictive';
+  created_at: string;
+}
+
+interface BuyBackLevel { price: number; maLabel: string }
+
 interface Recommendation {
   symbol: string;
   currency: string | null;
@@ -45,9 +56,12 @@ interface Recommendation {
   ma5: number | null;
   ma20: number | null;
   ma50: number | null;
+  rsi: number | null;
   signal: 'buy' | 'sell' | 'caution' | 'insufficient';
   recommendedMA: 'MA5' | 'MA20' | 'MA50' | null;
   reason: string;
+  alertLevel: BuyBackLevel | null;
+  confirmLevel: BuyBackLevel | null;
 }
 
 interface StockStats {
@@ -139,9 +153,19 @@ function App() {
   const [statsSymbol, setStatsSymbol] = useState<string | null>(null);
   const [stats, setStats] = useState<StockStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [positionSymbol, setPositionSymbol] = useState<string | null>(null);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [positionsLoading, setPositionsLoading] = useState(false);
+  const [showPortfolio, setShowPortfolio] = useState(false);
+  const [allPositions, setAllPositions] = useState<Position[]>([]);
+  const [posQty, setPosQty] = useState('');
+  const [posPrice, setPosPrice] = useState('');
+  const [posType, setPosType] = useState<'real' | 'fictive'>('real');
+  const [posError, setPosError] = useState('');
   const [showRecommendations, setShowRecommendations] = useState(false);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [recommendationsLoading, setRecommendationsLoading] = useState(false);
+  const [recoDetail, setRecoDetail] = useState<Recommendation | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const API_URL = 'http://localhost:3000/api/stocks';
@@ -336,6 +360,55 @@ function App() {
     }
   };
 
+  const openPositions = async (symbol: string) => {
+    setPositionSymbol(symbol);
+    setPositionsLoading(true);
+    setPosQty(''); setPosPrice(''); setPosType('real'); setPosError('');
+    try {
+      const res = await fetch(`${API_URL}/positions?symbol=${symbol}`);
+      setPositions(await res.json());
+    } catch { setPositions([]); }
+    finally { setPositionsLoading(false); }
+  };
+
+  const addPosition = async () => {
+    if (!positionSymbol) return;
+    const qty = parseFloat(posQty);
+    const price = parseFloat(posPrice.replace(',', '.'));
+    if (!qty || qty <= 0 || !price || price <= 0) {
+      setPosError('Quantité et prix doivent être des nombres positifs.');
+      return;
+    }
+    setPosError('');
+    try {
+      await fetch(`${API_URL}/positions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: positionSymbol, quantity: qty, purchase_price: price, type: posType }),
+      });
+      setPosQty(''); setPosPrice('');
+      const res = await fetch(`${API_URL}/positions?symbol=${positionSymbol}`);
+      setPositions(await res.json());
+    } catch { setPosError('Erreur lors de l\'ajout.'); }
+  };
+
+  const deletePosition = async (id: number) => {
+    await fetch(`${API_URL}/positions/${id}`, { method: 'DELETE' });
+    setPositions(prev => prev.filter(p => p.id !== id));
+  };
+
+  const openPortfolio = async () => {
+    setShowPortfolio(true);
+    try {
+      const [posRes, recoRes] = await Promise.all([
+        fetch(`${API_URL}/positions`),
+        recommendations.length === 0 ? fetch(`${API_URL}/recommendations`) : Promise.resolve(null),
+      ]);
+      setAllPositions(await posRes.json());
+      if (recoRes) setRecommendations(await recoRes.json());
+    } catch { setAllPositions([]); }
+  };
+
   return (
     <div className="min-h-screen bg-gray-100 py-2 px-4">
       <div className="max-w-4xl mx-auto">
@@ -482,8 +555,11 @@ function App() {
                             <th className="py-2 text-right">vs MA5</th>
                             <th className="py-2 text-right">vs MA20</th>
                             <th className="py-2 text-right">vs MA50</th>
+                            <th className="py-2 text-center">RSI</th>
                             <th className="py-2 text-center">Signal</th>
                             <th className="py-2 text-center">MA Reco</th>
+                            <th className="py-2 text-right">Pallier achat</th>
+                            <th className="py-2"></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -491,7 +567,7 @@ function App() {
                             const cur = r.currentPrice;
                             const ccy = r.currency || 'USD';
                             return (
-                              <tr key={r.symbol} className="hover:bg-gray-50" title={r.reason}>
+                              <tr key={r.symbol} className="hover:bg-gray-50">
                                 <td className="py-2 font-semibold text-blue-600">{r.symbol}</td>
                                 <td className="py-2 text-right text-gray-700">
                                   {cur !== null
@@ -508,9 +584,18 @@ function App() {
                                   );
                                 })}
                                 <td className="py-2 text-center">
-                                  {r.signal === 'buy' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>}
-                                  {r.signal === 'sell' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>}
-                                  {r.signal === 'caution' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>}
+                                  {r.rsi !== null ? (
+                                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                                      r.rsi > 70 ? 'bg-red-100 text-red-700' :
+                                      r.rsi < 30 ? 'bg-blue-100 text-blue-700' :
+                                      'bg-gray-100 text-gray-600'
+                                    }`}>{r.rsi.toFixed(0)}</span>
+                                  ) : <span className="text-gray-400">—</span>}
+                                </td>
+                                <td className="py-2 text-center">
+                                  {r.signal === 'buy' && <span onClick={() => setRecoDetail(r)} className="text-xs font-bold px-2 py-0.5 rounded bg-green-100 text-green-700 cursor-pointer hover:bg-green-200">ACHAT</span>}
+                                  {r.signal === 'sell' && <span onClick={() => setRecoDetail(r)} className="text-xs font-bold px-2 py-0.5 rounded bg-red-100 text-red-700 cursor-pointer hover:bg-red-200">VENTE</span>}
+                                  {r.signal === 'caution' && <span onClick={() => setRecoDetail(r)} className="text-xs font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700 cursor-pointer hover:bg-yellow-200">PRUDENCE</span>}
                                   {r.signal === 'insufficient' && <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">N/A</span>}
                                 </td>
                                 <td className="py-2 text-center">
@@ -522,6 +607,43 @@ function App() {
                                     }`}>{r.recommendedMA}</span>
                                   ) : <span className="text-gray-400">—</span>}
                                 </td>
+                                <td className="py-2 text-right">
+                                  {r.alertLevel && cur !== null ? (
+                                    <div className="flex flex-col items-end gap-1">
+                                      <div className="flex items-center gap-1">
+                                        <span className="text-xs text-orange-600 font-medium">
+                                          {r.alertLevel.price.toLocaleString('fr-FR', { style: 'currency', currency: ccy, maximumFractionDigits: 2 })}
+                                        </span>
+                                        <span className="text-xs bg-orange-100 text-orange-600 font-bold px-1 rounded">{r.alertLevel.maLabel}</span>
+                                        <span className="text-xs text-orange-400 italic">tentative</span>
+                                      </div>
+                                      {r.confirmLevel && (
+                                        <div className="flex items-center gap-1">
+                                          <span className="text-xs text-green-600 font-medium">
+                                            {r.confirmLevel.price.toLocaleString('fr-FR', { style: 'currency', currency: ccy, maximumFractionDigits: 2 })}
+                                          </span>
+                                          <span className="text-xs bg-green-100 text-green-600 font-bold px-1 rounded">{r.confirmLevel.maLabel}</span>
+                                          <span className="text-xs text-green-400 italic">confirmé</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  ) : r.signal === 'buy' ? (
+                                    <span className="text-xs text-green-600 font-medium">Achat possible</span>
+                                  ) : (
+                                    <span className="text-gray-400">—</span>
+                                  )}
+                                </td>
+                                <td className="py-2 text-center">
+                                  <button
+                                    onClick={() => { setShowRecommendations(false); openPositions(r.symbol); }}
+                                    className="text-emerald-600 hover:text-emerald-800 inline-flex items-center"
+                                    title={`Ajouter une position sur ${r.symbol}`}
+                                  >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                                    </svg>
+                                  </button>
+                                </td>
                               </tr>
                             );
                           })}
@@ -530,13 +652,579 @@ function App() {
                     </div>
 
                     {/* Légende */}
-                    <div className="mt-3 pt-3 border-t flex-shrink-0 text-xs text-gray-400 space-y-0.5">
-                      <p><span className="font-semibold text-blue-600">MA5</span> court terme · <span className="font-semibold text-violet-600">MA20</span> moyen terme · <span className="font-semibold text-indigo-600">MA50</span> long terme</p>
-                      <p>Le prix de référence est la dernière clôture enregistrée dans l'historique journalier. Survolez une ligne pour voir l'explication du signal.</p>
+                    <div className="mt-3 pt-3 border-t flex-shrink-0 text-xs text-gray-400">
+                      <details className="group">
+                        <summary className="cursor-pointer select-none text-violet-500 font-semibold hover:text-violet-700 flex items-center gap-1">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                          Guide de lecture
+                        </summary>
+
+                        <div className="mt-3 space-y-3">
+
+                          {/* Signaux */}
+                          <div>
+                            <p className="font-semibold text-gray-500 uppercase tracking-wide mb-1">Signaux</p>
+                            <table className="w-full text-xs border-collapse">
+                              <tbody>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3 w-24"><span className="font-bold px-2 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span></td>
+                                  <td className="py-1 text-gray-500">Prix au-dessus des MAs + RSI entre 45 et 70 → tendance haussière confirmée et saine</td>
+                                </tr>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3"><span className="font-bold px-2 py-0.5 rounded bg-red-100 text-red-700">VENTE</span></td>
+                                  <td className="py-1 text-gray-500">Prix en dessous des MAs + RSI entre 30 et 60 → tendance baissière confirmée</td>
+                                </tr>
+                                <tr>
+                                  <td className="py-1 pr-3"><span className="font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span></td>
+                                  <td className="py-1 text-gray-500">Signaux contradictoires : surachat (RSI &gt; 70), survente (RSI &lt; 30) ou MAs mixtes → attendre</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          {/* RSI */}
+                          <div>
+                            <p className="font-semibold text-gray-500 uppercase tracking-wide mb-1">RSI — Relative Strength Index (14 jours)</p>
+                            <table className="w-full text-xs border-collapse">
+                              <tbody>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3 w-24"><span className="font-semibold text-red-600">RSI &gt; 70</span></td>
+                                  <td className="py-1 text-gray-500">Surachat — la hausse est excessive, risque de correction à court terme</td>
+                                </tr>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3"><span className="font-semibold text-gray-600">RSI 30–70</span></td>
+                                  <td className="py-1 text-gray-500">Zone neutre — momentum équilibré, tendance crédible</td>
+                                </tr>
+                                <tr>
+                                  <td className="py-1 pr-3"><span className="font-semibold text-blue-600">RSI &lt; 30</span></td>
+                                  <td className="py-1 text-gray-500">Survente — la baisse est excessive, rebond technique possible</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          {/* Moyennes mobiles */}
+                          <div>
+                            <p className="font-semibold text-gray-500 uppercase tracking-wide mb-1">Moyennes mobiles</p>
+                            <table className="w-full text-xs border-collapse">
+                              <tbody>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3 w-24"><span className="font-bold text-blue-600">MA5</span></td>
+                                  <td className="py-1 text-gray-500">Court terme (5 jours) — très réactive, idéale en tendance forte pour les entrées</td>
+                                </tr>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3"><span className="font-bold text-violet-600">MA20</span></td>
+                                  <td className="py-1 text-gray-500">Moyen terme (20 jours) — référence équilibrée, valide pour tous les marchés</td>
+                                </tr>
+                                <tr>
+                                  <td className="py-1 pr-3"><span className="font-bold text-indigo-600">MA50</span></td>
+                                  <td className="py-1 text-gray-500">Long terme (50 jours) — filtre de tendance de fond, signal lent mais fiable</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          {/* Pallier de rachat */}
+                          <div>
+                            <p className="font-semibold text-gray-500 uppercase tracking-wide mb-1">Pallier de rachat</p>
+                            <table className="w-full text-xs border-collapse">
+                              <tbody>
+                                <tr className="border-b border-gray-100">
+                                  <td className="py-1 pr-3 w-28"><span className="font-semibold text-orange-600">tentative</span></td>
+                                  <td className="py-1 text-gray-500">Prix franchit la 1ère MA + RSI &gt; 45 → premier signe de retournement, entrée possible en petite position, risque élevé</td>
+                                </tr>
+                                <tr>
+                                  <td className="py-1 pr-3"><span className="font-semibold text-green-600">confirmé</span></td>
+                                  <td className="py-1 text-gray-500">Prix franchit la 2ème MA + RSI &gt; 50 → retournement confirmé, signal fiable, risque réduit</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+
+                          <p className="text-gray-400 italic">Cliquez sur un badge ACHAT / VENTE / PRUDENCE pour voir l'explication détaillée du signal.</p>
+                        </div>
+                      </details>
                     </div>
                   </>
                 );
               })()}
+            </div>
+          </div>
+        )}
+
+        {/* Modale Portefeuille global */}
+        {showPortfolio && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowPortfolio(false)}>
+            <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-6xl mx-4 max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+
+              <div className="flex items-center justify-between mb-5 flex-shrink-0">
+                <h2 className="text-xl font-semibold flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                  </svg>
+                  Portefeuille
+                </h2>
+                <button onClick={() => setShowPortfolio(false)} className="text-gray-400 hover:text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {allPositions.length === 0 ? (
+                <p className="text-center text-gray-400 py-12 text-sm">Aucune position enregistrée</p>
+              ) : (() => {
+                const renderSection = (type: 'real' | 'fictive') => {
+                  const list = allPositions.filter(p => p.type === type);
+                  if (list.length === 0) return null;
+
+                  // Grouper par devise
+                  const byCurrency: Record<string, Position[]> = {};
+                  list.forEach(p => {
+                    const ccy = quotes[p.symbol]?.currency || 'USD';
+                    if (!byCurrency[ccy]) byCurrency[ccy] = [];
+                    byCurrency[ccy].push(p);
+                  });
+
+                  const typeColor = type === 'real'
+                    ? 'border-blue-200 bg-blue-50'
+                    : 'border-purple-200 bg-purple-50';
+                  const badgeColor = type === 'real'
+                    ? 'bg-blue-100 text-blue-700'
+                    : 'bg-purple-100 text-purple-700';
+
+                  return (
+                    <div className={`mb-4 rounded-xl border p-4 ${typeColor}`}>
+                      <div className="flex items-center gap-2 mb-4">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${badgeColor}`}>
+                          {type === 'real' ? 'RÉEL' : 'FICTIF'}
+                        </span>
+                        <span className="text-sm font-semibold text-gray-700">
+                          {type === 'real' ? 'Positions réelles' : 'Positions fictives'}
+                        </span>
+                      </div>
+
+                      <div className="space-y-3">
+                        {Object.entries(byCurrency).map(([currency, cList]) => {
+                          const fmt = (v: number) => v.toLocaleString('fr-FR', { style: 'currency', currency, maximumFractionDigits: 2 });
+                          const totalInvested = cList.reduce((s, p) => s + p.quantity * p.purchase_price, 0);
+                          const totalCurrent = cList.reduce((s, p) => {
+                            const cur = quotes[p.symbol]?.price ?? null;
+                            return cur !== null ? s + p.quantity * cur : s;
+                          }, 0);
+                          const hasAllPrices = cList.every(p => quotes[p.symbol]?.price != null);
+                          const pnl = hasAllPrices ? totalCurrent - totalInvested : null;
+                          const pnlPct = pnl !== null && totalInvested > 0 ? (pnl / totalInvested) * 100 : null;
+                          const gain = pnl !== null && pnl > 0 ? pnl : null;
+                          const loss = pnl !== null && pnl < 0 ? pnl : null;
+
+                          return (
+                            <div key={currency} className="bg-white rounded-lg px-4 py-3 shadow-sm">
+                              <div className="flex items-center justify-between mb-3">
+                                <span className="text-xs font-bold text-gray-400 uppercase">{currency}</span>
+                                <span className="text-xs text-gray-400">{cList.length} position{cList.length > 1 ? 's' : ''}</span>
+                              </div>
+                              {/* Détail par position individuelle */}
+                              <table className="w-full text-sm mb-3">
+                                <thead>
+                                  <tr className="text-xs text-gray-400 uppercase border-b">
+                                    <th className="pb-1 text-left">Action</th>
+                                    <th className="pb-1 text-center">Signal</th>
+                                    <th className="pb-1 text-right">Qté</th>
+                                    <th className="pb-1 text-right">Prix achat</th>
+                                    <th className="pb-1 text-right">Investi</th>
+                                    <th className="pb-1 text-right">Valeur</th>
+                                    <th className="pb-1 text-right">Gain</th>
+                                    <th className="pb-1 text-right">Perte</th>
+                                    <th className="pb-1"></th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-100">
+                                  {cList.map(p => {
+                                    const inv = p.quantity * p.purchase_price;
+                                    const cur = quotes[p.symbol]?.price ?? null;
+                                    const val = cur !== null ? p.quantity * cur : null;
+                                    const pl = val !== null ? val - inv : null;
+                                    const plPct = pl !== null && inv > 0 ? (pl / inv) * 100 : null;
+                                    const reco = recommendations.find(rec => rec.symbol === p.symbol);
+                                    return (
+                                      <tr key={p.id} className="hover:bg-gray-50">
+                                        <td className="py-1.5 font-semibold text-blue-600">{p.symbol}</td>
+                                        <td className="py-1.5 text-center">
+                                          {reco ? (
+                                            <>
+                                              {reco.signal === 'buy'          && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>}
+                                              {reco.signal === 'sell'         && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>}
+                                              {reco.signal === 'caution'      && <span className="text-xs font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>}
+                                              {reco.signal === 'insufficient' && <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-400">N/A</span>}
+                                            </>
+                                          ) : <span className="text-gray-300 text-xs">—</span>}
+                                        </td>
+                                        <td className="py-1.5 text-right text-gray-600 whitespace-nowrap">{p.quantity}</td>
+                                        <td className="py-1.5 text-right text-gray-600 whitespace-nowrap">{fmt(p.purchase_price)}</td>
+                                        <td className="py-1.5 text-right text-gray-500 whitespace-nowrap">{fmt(inv)}</td>
+                                        <td className="py-1.5 text-right text-gray-700 whitespace-nowrap">{val !== null ? fmt(val) : '—'}</td>
+                                        <td className="py-1.5 text-right font-semibold text-green-600 whitespace-nowrap">
+                                          {pl !== null && pl > 0 ? `+${fmt(pl)}` : '—'}
+                                          {plPct !== null && pl !== null && pl > 0 && <span className="text-xs font-normal ml-1">(+{plPct.toFixed(1)}%)</span>}
+                                        </td>
+                                        <td className="py-1.5 text-right font-semibold text-red-600 whitespace-nowrap">
+                                          {pl !== null && pl < 0 ? fmt(pl) : '—'}
+                                          {plPct !== null && pl !== null && pl < 0 && <span className="text-xs font-normal ml-1">({plPct.toFixed(1)}%)</span>}
+                                        </td>
+                                        <td className="py-1.5 text-right">
+                                          <button
+                                            onClick={async () => {
+                                              await fetch(`${API_URL}/positions/${p.id}`, { method: 'DELETE' });
+                                              setAllPositions(prev => prev.filter(x => x.id !== p.id));
+                                            }}
+                                            className="text-gray-300 hover:text-red-500 transition-colors"
+                                            title="Supprimer"
+                                          >
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                            </svg>
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+
+                              {/* Total général */}
+                              <div className="border-t pt-2 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+                                <div>
+                                  <p className="text-xs text-gray-400 mb-0.5">Total investi</p>
+                                  <p className="font-bold text-gray-800">{fmt(totalInvested)}</p>
+                                </div>
+                                {hasAllPrices && <div>
+                                  <p className="text-xs text-gray-400 mb-0.5">Valeur actuelle</p>
+                                  <p className="font-bold text-gray-800">{fmt(totalCurrent)}</p>
+                                </div>}
+                                {gain !== null && <div>
+                                  <p className="text-xs text-gray-400 mb-0.5">Gain total</p>
+                                  <p className="font-bold text-green-600">+{fmt(gain)}<span className="text-xs font-normal ml-1">(+{pnlPct!.toFixed(1)}%)</span></p>
+                                </div>}
+                                {loss !== null && <div>
+                                  <p className="text-xs text-gray-400 mb-0.5">Perte totale</p>
+                                  <p className="font-bold text-red-600">{fmt(loss)}<span className="text-xs font-normal ml-1">({pnlPct!.toFixed(1)}%)</span></p>
+                                </div>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                };
+
+                return (
+                  <div className="overflow-auto flex-1 space-y-2">
+                    {renderSection('real')}
+                    {renderSection('fictive')}
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* Modale Positions / Portefeuille */}
+        {positionSymbol && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setPositionSymbol(null)}>
+            <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+
+              {/* En-tête */}
+              <div className="flex items-center justify-between mb-4 flex-shrink-0">
+                <div>
+                  <h2 className="text-xl font-semibold flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                    </svg>
+                    Positions — <span className="text-blue-600">{positionSymbol}</span>
+                    {quotes[positionSymbol]?.name && quotes[positionSymbol]!.name !== positionSymbol && (
+                      <span className="text-sm font-normal text-gray-400">{quotes[positionSymbol]!.name}</span>
+                    )}
+                  </h2>
+                  {quotes[positionSymbol] && (
+                    <p className="text-sm text-gray-500 mt-0.5">
+                      Prix actuel : <span className="font-semibold text-gray-800">
+                        {quotes[positionSymbol]!.price.toLocaleString('fr-FR', { style: 'currency', currency: quotes[positionSymbol]!.currency })}
+                      </span>
+                    </p>
+                  )}
+                </div>
+                <button onClick={() => setPositionSymbol(null)} className="text-gray-400 hover:text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Formulaire d'ajout */}
+              <div className="bg-gray-50 rounded-lg p-4 mb-4 flex-shrink-0">
+                <p className="text-xs font-semibold text-gray-500 uppercase mb-3">Nouvelle position</p>
+                <div className="flex flex-wrap gap-3 items-end">
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Quantité</label>
+                    <input type="number" min="0" step="any" placeholder="ex: 10"
+                      value={posQty} onChange={e => setPosQty(e.target.value)}
+                      className="border rounded px-2 py-1.5 text-sm w-28 focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Prix d'achat</label>
+                    <input type="text" inputMode="decimal" placeholder="ex: 264.50"
+                      value={posPrice} onChange={e => setPosPrice(e.target.value)}
+                      className="border rounded px-2 py-1.5 text-sm w-32 focus:outline-none focus:ring-2 focus:ring-emerald-400" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 block mb-1">Type</label>
+                    <div className="flex gap-2">
+                      {(['real', 'fictive'] as const).map(t => (
+                        <button key={t} onClick={() => setPosType(t)}
+                          className={`px-3 py-1.5 rounded text-xs font-semibold border transition-colors ${posType === t
+                            ? t === 'real' ? 'bg-blue-600 text-white border-blue-600' : 'bg-purple-600 text-white border-purple-600'
+                            : 'bg-white text-gray-500 border-gray-300 hover:border-gray-400'}`}>
+                          {t === 'real' ? 'Réel' : 'Fictif'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <button onClick={addPosition}
+                    className="px-4 py-1.5 bg-emerald-600 text-white rounded text-sm font-semibold hover:bg-emerald-700 transition-colors">
+                    Ajouter
+                  </button>
+                </div>
+                {posError && <p className="text-xs text-red-500 mt-2">{posError}</p>}
+              </div>
+
+              {/* Liste des positions */}
+              <div className="flex-1 overflow-auto">
+                {positionsLoading ? (
+                  <p className="text-center text-gray-400 py-8">Chargement...</p>
+                ) : positions.length === 0 ? (
+                  <p className="text-center text-gray-400 py-8 text-sm">Aucune position enregistrée</p>
+                ) : (() => {
+                  const currentPrice = quotes[positionSymbol]?.price ?? null;
+                  const currency = quotes[positionSymbol]?.currency || 'USD';
+                  const fmt = (v: number) => v.toLocaleString('fr-FR', { style: 'currency', currency, maximumFractionDigits: 2 });
+
+                  const realPos = positions.filter(p => p.type === 'real');
+                  const fictivePos = positions.filter(p => p.type === 'fictive');
+
+                  const summary = (list: Position[]) => {
+                    const invested = list.reduce((s, p) => s + p.quantity * p.purchase_price, 0);
+                    const current = currentPrice !== null ? list.reduce((s, p) => s + p.quantity * currentPrice, 0) : null;
+                    const pnl = current !== null ? current - invested : null;
+                    const pnlPct = invested > 0 && pnl !== null ? (pnl / invested) * 100 : null;
+                    return { invested, current, pnl, pnlPct };
+                  };
+
+                  const renderGroup = (list: Position[], label: string, color: string) => {
+                    if (list.length === 0) return null;
+                    const { invested, current, pnl, pnlPct } = summary(list);
+                    return (
+                      <div className="mb-4">
+                        <p className={`text-xs font-bold uppercase mb-2 ${color}`}>{label}</p>
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-xs text-gray-400 uppercase border-b">
+                              <th className="pb-1 text-right">Qté</th>
+                              <th className="pb-1 text-right">Prix achat</th>
+                              <th className="pb-1 text-right">Investi</th>
+                              <th className="pb-1 text-right">Valeur act.</th>
+                              <th className="pb-1 text-right">P&amp;L</th>
+                              <th className="pb-1"></th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {list.map(p => {
+                              const invested = p.quantity * p.purchase_price;
+                              const current = currentPrice !== null ? p.quantity * currentPrice : null;
+                              const pnl = current !== null ? current - invested : null;
+                              const pnlPct = invested > 0 && pnl !== null ? (pnl / invested) * 100 : null;
+                              return (
+                                <tr key={p.id} className="hover:bg-gray-50">
+                                  <td className="py-1.5 text-right text-gray-700">{p.quantity}</td>
+                                  <td className="py-1.5 text-right text-gray-700">{fmt(p.purchase_price)}</td>
+                                  <td className="py-1.5 text-right text-gray-500">{fmt(invested)}</td>
+                                  <td className="py-1.5 text-right text-gray-700">{current !== null ? fmt(current) : '—'}</td>
+                                  <td className="py-1.5 text-right">
+                                    {pnl !== null ? (
+                                      <span className={`font-semibold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        {pnl >= 0 ? '+' : ''}{fmt(pnl)}
+                                        <span className="text-xs ml-1">({pnlPct! >= 0 ? '+' : ''}{pnlPct!.toFixed(1)}%)</span>
+                                      </span>
+                                    ) : '—'}
+                                  </td>
+                                  <td className="py-1.5 pl-2">
+                                    <button onClick={() => deletePosition(p.id)} className="text-gray-300 hover:text-red-500">
+                                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                      </svg>
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                        {/* Sous-total */}
+                        <div className="mt-2 flex justify-end gap-6 text-xs border-t pt-2">
+                          <span className="text-gray-500">Investi : <span className="font-semibold text-gray-700">{fmt(invested)}</span></span>
+                          {current !== null && <span className="text-gray-500">Valeur : <span className="font-semibold text-gray-700">{fmt(current)}</span></span>}
+                          {pnl !== null && (
+                            <span className={`font-bold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              P&L : {pnl >= 0 ? '+' : ''}{fmt(pnl)} ({pnlPct! >= 0 ? '+' : ''}{pnlPct!.toFixed(1)}%)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  };
+
+                  return (
+                    <>
+                      {renderGroup(realPos, 'Positions réelles', 'text-blue-600')}
+                      {renderGroup(fictivePos, 'Positions fictives', 'text-purple-600')}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Popup détail recommandation */}
+        {recoDetail && (
+          <div
+            className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]"
+            onClick={() => setRecoDetail(null)}
+          >
+            <div
+              className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* En-tête */}
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg font-bold text-blue-600">{recoDetail.symbol}</span>
+                  {recoDetail.signal === 'buy' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>}
+                  {recoDetail.signal === 'sell' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>}
+                  {recoDetail.signal === 'caution' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>}
+                </div>
+                <button onClick={() => setRecoDetail(null)} className="text-gray-400 hover:text-gray-600">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Explication */}
+              <div className={`mb-4 p-3 rounded-lg text-sm font-medium ${
+                recoDetail.signal === 'buy' ? 'bg-green-50 text-green-800 border border-green-200' :
+                recoDetail.signal === 'sell' ? 'bg-red-50 text-red-800 border border-red-200' :
+                'bg-yellow-50 text-yellow-800 border border-yellow-200'
+              }`}>
+                {recoDetail.reason}
+              </div>
+
+              {/* RSI */}
+              {recoDetail.rsi !== null && (
+                <div className="mb-4 flex items-center gap-3">
+                  <span className="text-sm text-gray-500">RSI-14</span>
+                  <div className="flex-1 bg-gray-100 rounded-full h-2 relative">
+                    <div
+                      className={`h-2 rounded-full ${recoDetail.rsi > 70 ? 'bg-red-400' : recoDetail.rsi < 30 ? 'bg-blue-400' : 'bg-green-400'}`}
+                      style={{ width: `${recoDetail.rsi}%` }}
+                    />
+                    <div className="absolute top-0 left-[30%] w-px h-2 bg-gray-400 opacity-50" />
+                    <div className="absolute top-0 left-[70%] w-px h-2 bg-gray-400 opacity-50" />
+                  </div>
+                  <span className={`text-sm font-bold ${recoDetail.rsi > 70 ? 'text-red-600' : recoDetail.rsi < 30 ? 'text-blue-600' : 'text-green-600'}`}>
+                    {recoDetail.rsi.toFixed(1)}
+                  </span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                    recoDetail.rsi > 70 ? 'bg-red-100 text-red-700' :
+                    recoDetail.rsi < 30 ? 'bg-blue-100 text-blue-700' :
+                    'bg-green-100 text-green-700'
+                  }`}>
+                    {recoDetail.rsi > 70 ? 'Surachat' : recoDetail.rsi < 30 ? 'Survente' : 'Neutre'}
+                  </span>
+                </div>
+              )}
+
+              {/* Données chiffrées */}
+              <div className="space-y-2 text-sm">
+                {recoDetail.currentPrice !== null && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Prix actuel</span>
+                    <span className="font-semibold text-gray-800">
+                      {recoDetail.currentPrice.toLocaleString('fr-FR', { style: 'currency', currency: recoDetail.currency || 'USD' })}
+                    </span>
+                  </div>
+                )}
+                {(['MA5', 'MA20', 'MA50'] as const).map((maKey) => {
+                  const maVal = recoDetail[maKey.toLowerCase() as 'ma5' | 'ma20' | 'ma50'];
+                  if (maVal === null) return null;
+                  const cur = recoDetail.currentPrice;
+                  const pct = cur !== null ? ((cur - maVal) / maVal) * 100 : null;
+                  const above = pct !== null && pct >= 0;
+                  const isReco = recoDetail.recommendedMA === maKey;
+                  return (
+                    <div key={maKey} className={`flex justify-between items-center rounded px-2 py-1 ${isReco ? 'bg-violet-50' : ''}`}>
+                      <span className={`font-medium ${
+                        maKey === 'MA5' ? 'text-blue-600' :
+                        maKey === 'MA20' ? 'text-violet-600' : 'text-indigo-600'
+                      }`}>
+                        {maKey}{isReco && <span className="ml-1 text-xs text-violet-500">★ reco</span>}
+                      </span>
+                      <span className="text-gray-600">{maVal.toLocaleString('fr-FR', { style: 'currency', currency: recoDetail.currency || 'USD' })}</span>
+                      {pct !== null && (
+                        <span className={`font-semibold ${above ? 'text-green-600' : 'text-red-600'}`}>
+                          {above ? '↑' : '↓'} {(pct >= 0 ? '+' : '') + pct.toFixed(1)}%
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Pallier de rachat */}
+              {(recoDetail.alertLevel || recoDetail.confirmLevel) && (
+                <div className="mt-4 pt-3 border-t">
+                  <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Pallier de rachat</p>
+                  <div className="space-y-2">
+                    {recoDetail.alertLevel && (
+                      <div className="flex items-center justify-between bg-orange-50 border border-orange-200 rounded px-3 py-2">
+                        <div>
+                          <span className="text-xs font-bold text-orange-600">Alerte précoce</span>
+                          <p className="text-xs text-gray-500 mt-0.5">Prix &gt; {recoDetail.alertLevel.maLabel} + RSI &gt; 45</p>
+                        </div>
+                        <span className="text-sm font-bold text-orange-700">
+                          {recoDetail.alertLevel.price.toLocaleString('fr-FR', { style: 'currency', currency: recoDetail.currency || 'USD', maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    )}
+                    {recoDetail.confirmLevel && (
+                      <div className="flex items-center justify-between bg-green-50 border border-green-200 rounded px-3 py-2">
+                        <div>
+                          <span className="text-xs font-bold text-green-600">Confirmation</span>
+                          <p className="text-xs text-gray-500 mt-0.5">Prix &gt; {recoDetail.confirmLevel.maLabel} + RSI &gt; 50</p>
+                        </div>
+                        <span className="text-sm font-bold text-green-700">
+                          {recoDetail.confirmLevel.price.toLocaleString('fr-FR', { style: 'currency', currency: recoDetail.currency || 'USD', maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <p className="mt-4 text-xs text-gray-400 text-right">{recoDetail.dataPoints} jour{recoDetail.dataPoints > 1 ? 's' : ''} d'historique</p>
             </div>
           </div>
         )}
@@ -700,6 +1388,16 @@ function App() {
                   Reco
                 </button>
                 <button
+                  onClick={openPortfolio}
+                  className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded-md hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 flex items-center gap-1"
+                  title="Portefeuille — vue des gains/pertes"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                  </svg>
+                  Portefeuille
+                </button>
+                <button
                   onClick={fetchQuotes}
                   disabled={quotesLoading}
                   className="px-3 py-1.5 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-green-500"
@@ -852,6 +1550,15 @@ function App() {
                         </svg>
                       </a>
 
+                      <button
+                        onClick={() => openPositions(stock.symbol)}
+                        className="text-emerald-600 hover:text-emerald-800 font-medium inline-flex items-center"
+                        title="Positions / Portefeuille"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                        </svg>
+                      </button>
                       <button
                         onClick={() => handleDelete(stock.id!)}
                         className="text-red-600 hover:text-red-800 font-medium inline-flex items-center gap-1"

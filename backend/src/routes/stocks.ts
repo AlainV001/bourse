@@ -184,7 +184,7 @@ router.get('/stats/:symbol', (req: Request, res: Response) => {
   }
 });
 
-// GET - Recommandations pour toutes les actions (basé sur position prix vs MAs)
+// GET - Recommandations pour toutes les actions (basé sur position prix vs MAs + RSI)
 router.get('/recommendations', (req: Request, res: Response) => {
   try {
     const stocks = db.prepare('SELECT symbol FROM stocks ORDER BY symbol ASC').all() as { symbol: string }[];
@@ -195,7 +195,7 @@ router.get('/recommendations', (req: Request, res: Response) => {
       ).all(symbol) as { date: string; close_price: number; currency: string }[];
 
       if (entries.length === 0) {
-        return { symbol, dataPoints: 0, currentPrice: null, currency: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' };
+        return { symbol, dataPoints: 0, currentPrice: null, currency: null, ma5: null, ma20: null, ma50: null, rsi: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' };
       }
 
       const closes = entries.map(e => e.close_price);
@@ -211,6 +211,22 @@ router.get('/recommendations', (req: Request, res: Response) => {
       const ma20 = ma(20);
       const ma50 = ma(50);
 
+      // RSI-14 : nécessite au moins 15 points (14 variations)
+      const calcRsi14 = (): number | null => {
+        if (closes.length < 15) return null;
+        const recent = closes.slice(0, 15).reverse(); // chronologique
+        let gains = 0, losses = 0;
+        for (let i = 1; i < recent.length; i++) {
+          const diff = recent[i] - recent[i - 1];
+          if (diff > 0) gains += diff; else losses += Math.abs(diff);
+        }
+        const avgGain = gains / 14;
+        const avgLoss = losses / 14;
+        if (avgLoss === 0) return 100;
+        return 100 - (100 / (1 + avgGain / avgLoss));
+      };
+      const rsi = calcRsi14();
+
       const aboveMA5 = ma5 !== null ? currentPrice > ma5 : null;
       const aboveMA20 = ma20 !== null ? currentPrice > ma20 : null;
       const aboveMA50 = ma50 !== null ? currentPrice > ma50 : null;
@@ -222,46 +238,173 @@ router.get('/recommendations', (req: Request, res: Response) => {
       const ma5AboveMA20 = ma5 !== null && ma20 !== null ? ma5 > ma20 : null;
       const ma20AboveMA50 = ma20 !== null && ma50 !== null ? ma20 > ma50 : null;
 
+      // Signal MA brut
+      let maSignal: 'buy_strong' | 'buy_medium' | 'sell_strong' | 'sell_medium' | 'caution' | 'insufficient';
+      if (validCount === 0) {
+        maSignal = 'insufficient';
+      } else if (aboveCount === validCount && ma5AboveMA20 === true && ma20AboveMA50 === true) {
+        maSignal = 'buy_strong';
+      } else if (aboveCount === validCount) {
+        maSignal = 'buy_medium';
+      } else if (aboveCount === 0 && ma5AboveMA20 === false && ma20AboveMA50 === false) {
+        maSignal = 'sell_strong';
+      } else if (aboveCount === 0 && validCount > 0) {
+        maSignal = 'sell_medium';
+      } else {
+        maSignal = 'caution';
+      }
+
       let signal: string;
       let recommendedMA: string | null;
       let reason: string;
 
-      if (validCount === 0) {
+      const rsiLabel = rsi !== null ? ` (RSI ${rsi.toFixed(0)})` : '';
+
+      if (maSignal === 'insufficient') {
         signal = 'insufficient';
         recommendedMA = null;
         reason = 'Pas assez de données pour calculer les MAs';
-      } else if (aboveCount === validCount && ma5AboveMA20 === true && ma20AboveMA50 === true) {
-        signal = 'buy';
-        recommendedMA = 'MA5';
-        reason = 'MAs alignées à la hausse — tendance forte, MA5 idéale pour les entrées court terme';
-      } else if (aboveCount === validCount) {
-        signal = 'buy';
-        recommendedMA = 'MA20';
-        reason = 'Prix au-dessus de toutes les MAs mais alignement incomplet — MA20 comme référence';
-      } else if (aboveCount === 0 && ma5AboveMA20 === false && ma20AboveMA50 === false) {
-        signal = 'sell';
-        recommendedMA = 'MA5';
-        reason = 'MAs alignées à la baisse — tendance baissière forte, MA5 comme résistance à surveiller';
-      } else if (aboveCount === 0 && validCount > 0) {
-        signal = 'sell';
-        recommendedMA = 'MA20';
-        reason = 'Prix sous toutes les MAs calculées — pression vendeuse dominante';
-      } else if (aboveCount > validCount / 2) {
-        signal = 'caution';
-        recommendedMA = 'MA20';
-        reason = 'Tendance haussière partielle — MA20 comme support de référence';
+      } else if (maSignal === 'buy_strong') {
+        if (rsi === null || (rsi >= 50 && rsi <= 70)) {
+          signal = 'buy';
+          recommendedMA = 'MA5';
+          reason = `MAs alignées à la hausse — tendance forte${rsi !== null ? `, RSI sain${rsiLabel}` : ''}, MA5 idéale pour les entrées court terme`;
+        } else if (rsi > 70) {
+          signal = 'caution';
+          recommendedMA = 'MA5';
+          reason = `Tendance haussière forte mais RSI en surachat${rsiLabel} — risque de correction à court terme`;
+        } else {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `MAs alignées à la hausse mais RSI faible${rsiLabel} — momentum insuffisant, attendre confirmation`;
+        }
+      } else if (maSignal === 'buy_medium') {
+        if (rsi === null || (rsi >= 45 && rsi <= 70)) {
+          signal = 'buy';
+          recommendedMA = 'MA20';
+          reason = `Prix au-dessus des MAs${rsi !== null ? `, RSI sain${rsiLabel}` : ''} — MA20 comme référence`;
+        } else if (rsi > 70) {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Prix au-dessus des MAs mais RSI en surachat${rsiLabel} — attendre un repli avant d'entrer`;
+        } else {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Position favorable mais RSI faible${rsiLabel} — momentum en question`;
+        }
+      } else if (maSignal === 'sell_strong') {
+        if (rsi === null || (rsi >= 30 && rsi <= 50)) {
+          signal = 'sell';
+          recommendedMA = 'MA5';
+          reason = `MAs alignées à la baisse — tendance baissière forte${rsi !== null ? `, RSI confirme${rsiLabel}` : ''}, MA5 comme résistance`;
+        } else if (rsi < 30) {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Tendance baissière mais RSI en survente${rsiLabel} — rebond technique possible, ne pas vendre précipitamment`;
+        } else {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `MAs baissières mais RSI élevé${rsiLabel} — signal contradictoire, attendre confirmation`;
+        }
+      } else if (maSignal === 'sell_medium') {
+        if (rsi === null || (rsi >= 30 && rsi <= 60)) {
+          signal = 'sell';
+          recommendedMA = 'MA20';
+          reason = `Prix sous toutes les MAs${rsi !== null ? `, RSI confirme la pression vendeuse${rsiLabel}` : ''} — tendance baissière`;
+        } else if (rsi < 30) {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Prix sous les MAs mais RSI en survente${rsiLabel} — rebond possible, attendre avant de vendre`;
+        } else {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Signal MA baissier mais RSI fort${rsiLabel} — attendre confirmation de la tendance`;
+        }
       } else {
-        signal = 'caution';
-        recommendedMA = 'MA20';
-        reason = 'Signaux mixtes — consolidation, MA20 comme pivot central';
+        // caution MA
+        if (rsi !== null && rsi > 70) {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Signaux mixtes et RSI en surachat${rsiLabel} — prudence renforcée`;
+        } else if (rsi !== null && rsi < 30) {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Signaux mixtes et RSI en survente${rsiLabel} — surveiller un retournement`;
+        } else {
+          signal = 'caution';
+          recommendedMA = 'MA20';
+          reason = `Signaux mixtes — consolidation${rsi !== null ? `${rsiLabel}` : ''}, MA20 comme pivot central`;
+        }
       }
 
-      return { symbol, currency, dataPoints: entries.length, currentPrice, ma5, ma20, ma50, signal, recommendedMA, reason };
+      // Pallier de rachat : MAs au-dessus du prix actuel, triées par ordre croissant
+      type BuyBackLevel = { price: number; maLabel: string } | null;
+      let alertLevel: BuyBackLevel = null;
+      let confirmLevel: BuyBackLevel = null;
+
+      if (signal === 'sell' || signal === 'caution') {
+        const masAbove = ([
+          ma5  !== null && ma5  > currentPrice ? { price: ma5,  maLabel: 'MA5'  } : null,
+          ma20 !== null && ma20 > currentPrice ? { price: ma20, maLabel: 'MA20' } : null,
+          ma50 !== null && ma50 > currentPrice ? { price: ma50, maLabel: 'MA50' } : null,
+        ] as ({ price: number; maLabel: string } | null)[])
+          .filter((x): x is { price: number; maLabel: string } => x !== null)
+          .sort((a, b) => a.price - b.price);
+
+        alertLevel   = masAbove[0] ?? null;
+        confirmLevel = masAbove[1] ?? null;
+      }
+
+      return { symbol, currency, dataPoints: entries.length, currentPrice, ma5, ma20, ma50, rsi, signal, recommendedMA, reason, alertLevel, confirmLevel };
     });
 
     res.json(results);
   } catch (error) {
     res.status(500).json({ error: 'Erreur lors du calcul des recommandations' });
+  }
+});
+
+// GET - Récupérer les positions (toutes ou filtrées par symbole)
+router.get('/positions', (req: Request, res: Response) => {
+  try {
+    const { symbol } = req.query;
+    const positions = symbol
+      ? db.prepare('SELECT * FROM positions WHERE symbol = ? ORDER BY created_at DESC').all(symbol)
+      : db.prepare('SELECT * FROM positions ORDER BY symbol ASC, created_at DESC').all();
+    res.json(positions);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors de la récupération des positions' });
+  }
+});
+
+// POST - Ajouter une position
+router.post('/positions', (req: Request, res: Response) => {
+  try {
+    const { symbol, quantity, purchase_price, type } = req.body;
+    if (!symbol || quantity == null || purchase_price == null) {
+      return res.status(400).json({ error: 'symbol, quantity et purchase_price sont requis' });
+    }
+    const result = db.prepare(
+      'INSERT INTO positions (symbol, quantity, purchase_price, type) VALUES (?, ?, ?, ?)'
+    ).run(String(symbol).toUpperCase(), Number(quantity), Number(purchase_price), type || 'real');
+    const position = db.prepare('SELECT * FROM positions WHERE id = ?').get(result.lastInsertRowid);
+    res.status(201).json(position);
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors de la création de la position' });
+  }
+});
+
+// DELETE - Supprimer une position
+router.delete('/positions/:id', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = db.prepare('DELETE FROM positions WHERE id = ?').run(id);
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'Position non trouvée' });
+    }
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors de la suppression de la position' });
   }
 });
 

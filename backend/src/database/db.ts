@@ -40,6 +40,18 @@ db.exec(`
   )
 `);
 
+// Créer la table positions pour le suivi de portefeuille
+db.exec(`
+  CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    purchase_price REAL NOT NULL,
+    type TEXT NOT NULL DEFAULT 'real',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
 // Migration : supprimer la colonne name si elle existe
 try {
   db.prepare('SELECT name FROM stocks LIMIT 1').get();
