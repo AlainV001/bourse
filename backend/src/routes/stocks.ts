@@ -14,21 +14,16 @@ router.get('/quotes', async (req: Request, res: Response) => {
       return res.json({});
     }
 
-    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number; refreshed_at: string; dailyTrend: number | null; name: string } | null> = {};
+    const quotes: Record<string, { price: number; currency: string; change: number; changePercent: number; refreshed_at: string; dailyTrend: number | null; name: string; volume: number | null } | null> = {};
 
     const YF = require('yahoo-finance2').default;
-    const yf = new YF({ suppressNotices: ['yahooSurvey'] });
+    const yf = new YF({ suppressNotices: ['yahooSurvey', 'ripHistorical'] });
 
     const refreshedAt = new Date().toISOString();
     const today = refreshedAt.slice(0, 10); // YYYY-MM-DD
 
     const insertHistory = db.prepare(
       'INSERT INTO quote_history (symbol, price, currency, change, change_percent, refreshed_at) VALUES (?, ?, ?, ?, ?, ?)'
-    );
-
-    const insertDailyHistory = db.prepare(
-      `INSERT OR REPLACE INTO daily_history (symbol, date, open_price, close_price, currency, day_change_percent)
-       VALUES (?, ?, ?, ?, ?, ?)`
     );
 
     const getPricesToday = db.prepare(
@@ -49,6 +44,7 @@ router.get('/quotes', async (req: Request, res: Response) => {
           const change = result.regularMarketChange ?? 0;
           const changePercent = result.regularMarketChangePercent ?? 0;
           const name = result.longName ?? result.shortName ?? symbol;
+          const volume = result.regularMarketVolume ?? null;
 
           // Récupérer le dernier cours de la veille avant purge
           const yesterdayClose = db.prepare(
@@ -72,10 +68,54 @@ router.get('/quotes', async (req: Request, res: Response) => {
 
           insertHistory.run(symbol, price, currency, change, changePercent, refreshedAt);
 
-          // Insérer/mettre à jour l'historique journalier
-          if (openPrice > 0) {
-            const dayChangePercent = ((price - openPrice) / openPrice) * 100;
-            insertDailyHistory.run(symbol, today, openPrice, price, currency, dayChangePercent);
+          // Mettre à jour daily_history selon le cas : même jour ou nouveau jour
+          const todayEntry = db.prepare(
+            'SELECT open_price FROM daily_history WHERE symbol = ? AND date = ?'
+          ).get(symbol, today) as { open_price: number } | undefined;
+
+          if (todayEntry) {
+            // Même jour : mettre à jour uniquement le cours de clôture courant et le volume
+            const dayPct = ((price - todayEntry.open_price) / todayEntry.open_price) * 100;
+            db.prepare(
+              `UPDATE daily_history SET close_price = ?, volume = ?, day_change_percent = ? WHERE symbol = ? AND date = ?`
+            ).run(price, volume, dayPct, symbol, today);
+          } else {
+            // Nouveau jour :
+            // 1. Mettre à jour la veille avec les données définitives (clôture + volume final)
+            try {
+              const p1 = new Date(Date.now() - 4 * 24 * 3600 * 1000);
+              const histBars: any[] = await yf.historical(symbol, { period1: p1, period2: new Date(), interval: '1d' });
+              const recentBar = histBars
+                .filter(b => (b.date instanceof Date ? b.date : new Date(b.date)).toISOString().slice(0, 10) < today)
+                .sort((a, b) => {
+                  const da = (a.date instanceof Date ? a.date : new Date(a.date)).toISOString().slice(0, 10);
+                  const db2 = (b.date instanceof Date ? b.date : new Date(b.date)).toISOString().slice(0, 10);
+                  return db2.localeCompare(da);
+                })[0];
+              if (recentBar?.close) {
+                const prevDate = (recentBar.date instanceof Date ? recentBar.date : new Date(recentBar.date)).toISOString().slice(0, 10);
+                const prevPct = recentBar.open ? ((recentBar.close - recentBar.open) / recentBar.open) * 100 : 0;
+                db.prepare(
+                  `UPDATE daily_history SET close_price = ?, volume = ?, day_change_percent = ? WHERE symbol = ? AND date = ?`
+                ).run(recentBar.close, recentBar.volume ?? null, prevPct, symbol, prevDate);
+              }
+            } catch {
+              // non critique
+            }
+
+            // 2. Créer l'entrée du jour avec open_price = clôture définitive de la veille
+            const prevClose = db.prepare(
+              'SELECT close_price FROM daily_history WHERE symbol = ? AND date < ? ORDER BY date DESC LIMIT 1'
+            ).get(symbol, today) as { close_price: number } | undefined;
+
+            const todayOpen = prevClose?.close_price ?? (result.regularMarketOpen ?? 0);
+            if (todayOpen > 0) {
+              const dayPct = ((price - todayOpen) / todayOpen) * 100;
+              db.prepare(
+                `INSERT INTO daily_history (symbol, date, open_price, close_price, currency, day_change_percent, volume)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`
+              ).run(symbol, today, todayOpen, price, currency, dayPct, volume);
+            }
           }
 
           // Calculer la tendance : plus longue séquence consécutive de hausses ou baisses du jour
@@ -105,7 +145,7 @@ router.get('/quotes', async (req: Request, res: Response) => {
             }
           }
 
-          quotes[symbol] = { price, currency, change, changePercent, refreshed_at: refreshedAt, dailyTrend, name };
+          quotes[symbol] = { price, currency, change, changePercent, refreshed_at: refreshedAt, dailyTrend, name, volume };
         } catch {
           quotes[symbol] = null;
         }
@@ -191,11 +231,11 @@ router.get('/recommendations', (req: Request, res: Response) => {
 
     const results = stocks.map(({ symbol }) => {
       const entries = db.prepare(
-        'SELECT date, close_price, currency FROM daily_history WHERE symbol = ? ORDER BY date DESC LIMIT 50'
-      ).all(symbol) as { date: string; close_price: number; currency: string }[];
+        'SELECT date, open_price, close_price, currency, volume FROM daily_history WHERE symbol = ? ORDER BY date DESC LIMIT 50'
+      ).all(symbol) as { date: string; open_price: number; close_price: number; currency: string; volume: number | null }[];
 
       if (entries.length === 0) {
-        return { symbol, dataPoints: 0, currentPrice: null, currency: null, ma5: null, ma20: null, ma50: null, rsi: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' };
+        return { symbol, dataPoints: 0, currentPrice: null, currency: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null };
       }
 
       const closes = entries.map(e => e.close_price);
@@ -226,6 +266,40 @@ router.get('/recommendations', (req: Request, res: Response) => {
         return 100 - (100 / (1 + avgGain / avgLoss));
       };
       const rsi = calcRsi14();
+
+      // MACD(12, 26, 9) — nécessite au moins 35 points
+      const calcMACD = (): { macd: number; macdSig: number; histogram: number; trend: 'bullish' | 'bearish' | 'neutral'; crossover: 'bullish' | 'bearish' | null } | null => {
+        if (closes.length < 35) return null;
+        const chron = [...closes].reverse(); // ordre chronologique
+        const ema = (data: number[], p: number): number[] => {
+          if (data.length < p) return [];
+          const k = 2 / (p + 1);
+          const r = [data.slice(0, p).reduce((a, b) => a + b, 0) / p];
+          for (let i = p; i < data.length; i++) r.push(data[i] * k + r[r.length - 1] * (1 - k));
+          return r;
+        };
+        const e12 = ema(chron, 12); // e12[i] correspond à chron[11+i]
+        const e26 = ema(chron, 26); // e26[i] correspond à chron[25+i]
+        if (e26.length === 0) return null;
+        const macdLine: number[] = [];
+        for (let i = 0; i < e26.length; i++) {
+          if (14 + i >= e12.length) break;
+          macdLine.push(e12[14 + i] - e26[i]);
+        }
+        if (macdLine.length < 9) return null;
+        const sigLine = ema(macdLine, 9);
+        if (sigLine.length < 2) return null;
+        const m = macdLine[macdLine.length - 1];
+        const s = sigLine[sigLine.length - 1];
+        const hist = m - s;
+        const prevHist = macdLine[macdLine.length - 2] - sigLine[sigLine.length - 2];
+        let crossover: 'bullish' | 'bearish' | null = null;
+        if (prevHist <= 0 && hist > 0) crossover = 'bullish';
+        else if (prevHist >= 0 && hist < 0) crossover = 'bearish';
+        const trend: 'bullish' | 'bearish' | 'neutral' = hist > 0 ? 'bullish' : hist < 0 ? 'bearish' : 'neutral';
+        return { macd: m, macdSig: s, histogram: hist, trend, crossover };
+      };
+      const macdResult = calcMACD();
 
       const aboveMA5 = ma5 !== null ? currentPrice > ma5 : null;
       const aboveMA20 = ma20 !== null ? currentPrice > ma20 : null;
@@ -272,11 +346,11 @@ router.get('/recommendations', (req: Request, res: Response) => {
         } else if (rsi > 70) {
           signal = 'caution';
           recommendedMA = 'MA5';
-          reason = `Tendance haussière forte mais RSI en surachat${rsiLabel} — risque de correction à court terme`;
+          reason = `La tendance de fond est haussière : prix au-dessus de toutes les MAs, moyennes mobiles alignées à la hausse. Mais le RSI à ${rsi!.toFixed(0)} indique un surachat — le titre a monté trop vite. Un repli vers la MA5 est probable avant la suite. Attendre ce repli pour entrer à meilleur prix.`;
         } else {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `MAs alignées à la hausse mais RSI faible${rsiLabel} — momentum insuffisant, attendre confirmation`;
+          reason = `La structure est haussière (MAs alignées, prix au-dessus), mais le RSI à ${rsi!.toFixed(0)} révèle un manque de momentum : les acheteurs ne prennent pas encore clairement le dessus. La hausse n'est pas confirmée en force. Surveiller un retour du RSI au-dessus de 50 avant d'entrer.`;
         }
       } else if (maSignal === 'buy_medium') {
         if (rsi === null || (rsi >= 45 && rsi <= 70)) {
@@ -286,11 +360,11 @@ router.get('/recommendations', (req: Request, res: Response) => {
         } else if (rsi > 70) {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Prix au-dessus des MAs mais RSI en surachat${rsiLabel} — attendre un repli avant d'entrer`;
+          reason = `Le prix est au-dessus des moyennes mobiles (positif), mais le RSI à ${rsi!.toFixed(0)} signale un surachat — le titre a déjà intégré beaucoup de hausse. Un repli technique à court terme est probable. Préférer attendre un retour vers la MA20 pour un meilleur point d'entrée.`;
         } else {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Position favorable mais RSI faible${rsiLabel} — momentum en question`;
+          reason = `Le prix tient au-dessus des moyennes mobiles, mais le RSI à ${rsi!.toFixed(0)} indique que la dynamique haussière manque d'élan : les acheteurs ne sont pas convaincus. Attendre que le RSI remonte au-dessus de 45 pour confirmer que la hausse reprend de la vigueur.`;
         }
       } else if (maSignal === 'sell_strong') {
         if (rsi === null || (rsi >= 30 && rsi <= 50)) {
@@ -300,11 +374,11 @@ router.get('/recommendations', (req: Request, res: Response) => {
         } else if (rsi < 30) {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Tendance baissière mais RSI en survente${rsiLabel} — rebond technique possible, ne pas vendre précipitamment`;
+          reason = `Les MAs sont alignées à la baisse (tendance baissière structurelle), mais le RSI à ${rsi!.toFixed(0)} indique une survente extrême : le titre a trop baissé trop vite. Un rebond technique est probable à court terme. Ne pas vendre dans la précipitation — attendre la fin du rebond pour réévaluer.`;
         } else {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `MAs baissières mais RSI élevé${rsiLabel} — signal contradictoire, attendre confirmation`;
+          reason = `Les moyennes mobiles indiquent une tendance baissière, mais le RSI à ${rsi!.toFixed(0)} reste élevé : les acheteurs résistent encore et les vendeurs n'ont pas pris le contrôle. Signal contradictoire. Attendre que le RSI passe sous 50 pour confirmer la tendance baissière avant d'agir.`;
         }
       } else if (maSignal === 'sell_medium') {
         if (rsi === null || (rsi >= 30 && rsi <= 60)) {
@@ -314,26 +388,107 @@ router.get('/recommendations', (req: Request, res: Response) => {
         } else if (rsi < 30) {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Prix sous les MAs mais RSI en survente${rsiLabel} — rebond possible, attendre avant de vendre`;
+          reason = `Le prix est passé sous les moyennes mobiles (signal baissier), mais le RSI à ${rsi!.toFixed(0)} signale une survente : une réaction haussière technique est probable à court terme. Ne pas se précipiter à vendre — attendre la fin du rebond pour décider avec plus de visibilité.`;
         } else {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Signal MA baissier mais RSI fort${rsiLabel} — attendre confirmation de la tendance`;
+          reason = `Le prix est sous les moyennes mobiles, mais le RSI à ${rsi!.toFixed(0)} reste fort : les acheteurs n'ont pas encore capitulé. La baisse n'est pas encore confirmée par le momentum. Attendre que le RSI redescende sous 50 avant de conclure à une tendance baissière installée.`;
         }
       } else {
         // caution MA
         if (rsi !== null && rsi > 70) {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Signaux mixtes et RSI en surachat${rsiLabel} — prudence renforcée`;
+          reason = `Les moyennes mobiles envoient des signaux contradictoires (pas de tendance claire), et le RSI à ${rsi!.toFixed(0)} aggrave la situation en signalant un surachat. Aucun signal d'entrée justifié. Attendre une consolidation et un retour du RSI sous 60 pour y voir plus clair.`;
         } else if (rsi !== null && rsi < 30) {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Signaux mixtes et RSI en survente${rsiLabel} — surveiller un retournement`;
+          reason = `Les moyennes mobiles sont contradictoires (sans direction définie), mais le RSI à ${rsi!.toFixed(0)} indique une survente : un rebond technique est possible. Surveiller si ce rebond s'accompagne d'un réalignement des MAs pour confirmer un vrai retournement haussier.`;
         } else {
           signal = 'caution';
           recommendedMA = 'MA20';
-          reason = `Signaux mixtes — consolidation${rsi !== null ? `${rsiLabel}` : ''}, MA20 comme pivot central`;
+          reason = `Les moyennes mobiles envoient des signaux mixtes sans direction claire${rsi !== null ? ` et le RSI à ${rsi.toFixed(0)} ne tranche pas` : ''}. Le titre est en phase de consolidation. La MA20 fait office de pivot : une cassure franche au-dessus ou en dessous donnera le prochain signal directionnel.`;
+        }
+      }
+
+      // MACD — 3ème filtre de confirmation du momentum
+      if (macdResult !== null && signal !== 'insufficient') {
+        if (signal === 'buy') {
+          if (macdResult.trend === 'bearish') {
+            signal = 'caution';
+            reason = `La structure haussière est en place (MAs alignées, RSI sain), mais le MACD (${macdResult.macd.toFixed(2)}) est sous sa ligne signal (${macdResult.macdSig.toFixed(2)}) : le momentum baissier n'est pas encore inversé. Attendre un croisement haussier du MACD avant d'entrer.`;
+          } else {
+            const extra = macdResult.crossover === 'bullish' ? ' Croisement haussier du MACD détecté : signal renforcé.' : '';
+            reason += ` Le MACD confirme le momentum haussier (${macdResult.macd.toFixed(2)} > ${macdResult.macdSig.toFixed(2)}).${extra}`;
+          }
+        } else if (signal === 'sell') {
+          if (macdResult.trend === 'bullish') {
+            signal = 'caution';
+            reason = `La structure baissière est en place (MAs alignées, RSI confirme), mais le MACD (${macdResult.macd.toFixed(2)}) est au-dessus de sa ligne signal (${macdResult.macdSig.toFixed(2)}) : le momentum se retourne à la hausse. Ne pas vendre précipitamment — attendre que le MACD repasse sous sa ligne signal.`;
+          } else {
+            const extra = macdResult.crossover === 'bearish' ? ' Croisement baissier du MACD détecté : signal renforcé.' : '';
+            reason += ` Le MACD confirme le momentum baissier (${macdResult.macd.toFixed(2)} < ${macdResult.macdSig.toFixed(2)}).${extra}`;
+          }
+        } else if (signal === 'caution') {
+          if (macdResult.crossover === 'bullish') {
+            reason += ` De plus, le MACD vient de croiser sa ligne signal à la hausse (${macdResult.macd.toFixed(2)} > ${macdResult.macdSig.toFixed(2)}) : surveiller un possible retournement haussier.`;
+          } else if (macdResult.crossover === 'bearish') {
+            reason += ` De plus, le MACD vient de croiser sa ligne signal à la baisse (${macdResult.macd.toFixed(2)} < ${macdResult.macdSig.toFixed(2)}) : surveiller un possible retournement baissier.`;
+          } else if (macdResult.trend === 'bullish') {
+            reason += ` Le MACD penche haussier (${macdResult.macd.toFixed(2)} > ${macdResult.macdSig.toFixed(2)}), mais ne suffit pas à lever la prudence.`;
+          } else if (macdResult.trend === 'bearish') {
+            reason += ` Le MACD penche baissier (${macdResult.macd.toFixed(2)} < ${macdResult.macdSig.toFixed(2)}), ce qui renforce la vigilance.`;
+          }
+        }
+      }
+
+      // Volume — 4ème filtre de conviction
+      const fmtVol = (v: number): string => {
+        if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}G`;
+        if (v >= 1_000_000)     return `${(v / 1_000_000).toFixed(1)}M`;
+        if (v >= 1_000)         return `${(v / 1_000).toFixed(0)}K`;
+        return `${v}`;
+      };
+
+      const volEntries = entries.filter(e => e.volume !== null && e.volume! > 0).map(e => e.volume as number);
+      let currentVolume: number | null = null;
+      let avgVolume20: number | null = null;
+      let volumeRatio: number | null = null;
+
+      if (volEntries.length >= 2) {
+        currentVolume = volEntries[0];
+        const past20 = volEntries.slice(1, 21);
+        avgVolume20 = past20.reduce((a, b) => a + b, 0) / past20.length;
+        volumeRatio = currentVolume / avgVolume20;
+      }
+
+      if (volumeRatio !== null && currentVolume !== null && avgVolume20 !== null && signal !== 'insufficient') {
+        const volLabel = `${fmtVol(currentVolume)} vs moy. 20j ${fmtVol(avgVolume20)}`;
+        if (signal === 'buy') {
+          if (volumeRatio > 1.5) {
+            reason += ` Le volume (${volLabel}, ratio ${volumeRatio.toFixed(1)}×) confirme : le mouvement haussier est soutenu par une forte conviction du marché.`;
+          } else if (volumeRatio < 0.7) {
+            signal = 'caution';
+            reason = `Signal haussier (MAs, RSI, MACD) mais volume insuffisant (${volLabel}, ratio ${volumeRatio.toFixed(1)}×) : le mouvement manque de conviction. Attendre un retour du volume avant d'entrer.`;
+          }
+        } else if (signal === 'sell') {
+          if (volumeRatio > 1.5) {
+            reason += ` Le volume (${volLabel}, ratio ${volumeRatio.toFixed(1)}×) confirme : la pression vendeuse est massive et convaincante.`;
+          } else if (volumeRatio < 0.7) {
+            signal = 'caution';
+            reason = `Signal baissier (MAs, RSI, MACD) mais volume insuffisant (${volLabel}, ratio ${volumeRatio.toFixed(1)}×) : la baisse manque de conviction, risque de faux signal. Attendre confirmation.`;
+          }
+        } else if (signal === 'caution') {
+          if (volumeRatio > 2.0) {
+            const lastEntry = entries[0];
+            if (lastEntry.close_price > lastEntry.open_price) {
+              reason += ` Volume exceptionnel (${volumeRatio.toFixed(1)}× la moyenne) sur une séance haussière : fort signal d'accumulation, surveiller un retournement à la hausse.`;
+            } else {
+              reason += ` Volume exceptionnel (${volumeRatio.toFixed(1)}× la moyenne) sur une séance baissière : fort signal de distribution, surveiller une poursuite à la baisse.`;
+            }
+          } else if (volumeRatio < 0.7) {
+            reason += ` Le faible volume (ratio ${volumeRatio.toFixed(1)}×) confirme une consolidation sans conviction : aucune urgence à agir.`;
+          }
         }
       }
 
@@ -355,12 +510,125 @@ router.get('/recommendations', (req: Request, res: Response) => {
         confirmLevel = masAbove[1] ?? null;
       }
 
-      return { symbol, currency, dataPoints: entries.length, currentPrice, ma5, ma20, ma50, rsi, signal, recommendedMA, reason, alertLevel, confirmLevel };
+      // Historique des signaux : récupérer le signal de la veille et upsert aujourd'hui
+      const today = new Date().toISOString().slice(0, 10);
+      const prevSignalRow = db.prepare(
+        'SELECT signal FROM signal_history WHERE symbol = ? AND date < ? ORDER BY date DESC LIMIT 1'
+      ).get(symbol, today) as { signal: string } | undefined;
+      const previousSignal: string | null = prevSignalRow?.signal ?? null;
+
+      const calculatedAt = new Date().toISOString();
+      const existingSignalRow = db.prepare(
+        'SELECT signal FROM signal_history WHERE symbol = ? AND date = ?'
+      ).get(symbol, today) as { signal: string } | undefined;
+
+      if (!existingSignalRow) {
+        // Nouvelle entrée du jour
+        db.prepare(
+          'INSERT INTO signal_history (symbol, date, signal, calculated_at) VALUES (?, ?, ?, ?)'
+        ).run(symbol, today, signal, calculatedAt);
+      } else if (existingSignalRow.signal !== signal) {
+        // Signal changé dans la journée → mettre à jour avec nouvel horodatage
+        db.prepare(
+          'UPDATE signal_history SET signal = ?, calculated_at = ? WHERE symbol = ? AND date = ?'
+        ).run(signal, calculatedAt, symbol, today);
+      }
+      // Signal identique → ne rien faire, conserver l'horodatage d'origine
+
+      // Date depuis laquelle le signal actuel est actif (début du run consécutif)
+      const lastDiffRow = db.prepare(
+        'SELECT MAX(date) as d FROM signal_history WHERE symbol = ? AND signal != ? AND date <= ?'
+      ).get(symbol, signal, today) as { d: string | null };
+      const afterDate = lastDiffRow.d ?? '1970-01-01';
+      const signalSinceRow = db.prepare(
+        'SELECT MIN(date) as d, calculated_at FROM signal_history WHERE symbol = ? AND signal = ? AND date > ?'
+      ).get(symbol, signal, afterDate) as { d: string | null; calculated_at: string | null };
+      const signalSince: string | null = signalSinceRow.calculated_at ?? signalSinceRow.d ?? null;
+
+      // Date depuis laquelle le signal PRÉCÉDENT était actif (pour afficher "ACHAT depuis 15/01 → VENTE")
+      let previousSignalSince: string | null = null;
+      if (previousSignal && previousSignal !== signal) {
+        // afterDate = dernier jour du run précédent → chercher le début de ce run
+        const prevRunLastDiff = db.prepare(
+          'SELECT MAX(date) as d FROM signal_history WHERE symbol = ? AND signal != ? AND date <= ?'
+        ).get(symbol, previousSignal, afterDate) as { d: string | null };
+        const prevRunAfterDate = prevRunLastDiff.d ?? '1970-01-01';
+        const prevSinceRow = db.prepare(
+          'SELECT MIN(date) as d FROM signal_history WHERE symbol = ? AND signal = ? AND date > ?'
+        ).get(symbol, previousSignal, prevRunAfterDate) as { d: string | null };
+        previousSignalSince = prevSinceRow.d ?? null;
+      }
+
+      return {
+        symbol, currency, dataPoints: entries.length, currentPrice, ma5, ma20, ma50, rsi,
+        macdValue: macdResult?.macd ?? null,
+        macdSignalValue: macdResult?.macdSig ?? null,
+        macdHistogram: macdResult?.histogram ?? null,
+        macdTrend: macdResult?.trend ?? null,
+        currentVolume, avgVolume20, volumeRatio,
+        signal, previousSignal, previousSignalSince, signalSince, recommendedMA, reason, alertLevel, confirmLevel
+      };
     });
 
     res.json(results);
   } catch (error) {
     res.status(500).json({ error: 'Erreur lors du calcul des recommandations' });
+  }
+});
+
+// GET - Backfill historique OHLCV + volume (2 ans) pour toutes les actions
+router.get('/backfill-history', async (req: Request, res: Response) => {
+  try {
+    const stocks = db.prepare('SELECT symbol FROM stocks').all() as Stock[];
+    const symbols = stocks.map(s => s.symbol);
+
+    if (symbols.length === 0) {
+      return res.json({ message: 'Aucune action à traiter', results: [] });
+    }
+
+    const YF = require('yahoo-finance2').default;
+    const yf = new YF({ suppressNotices: ['yahooSurvey', 'ripHistorical'] });
+
+    const period1 = new Date(Date.now() - 50 * 24 * 3600 * 1000);
+
+    const upsertBar = db.prepare(
+      `INSERT OR REPLACE INTO daily_history (symbol, date, open_price, close_price, currency, day_change_percent, volume)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    const upsertSymbol = db.transaction((symbol: string, bars: any[], currency: string) => {
+      let count = 0;
+      for (const bar of bars) {
+        if (!bar.open || !bar.close) continue;
+        const dateStr = (bar.date instanceof Date ? bar.date : new Date(bar.date)).toISOString().slice(0, 10);
+        const dayPct = ((bar.close - bar.open) / bar.open) * 100;
+        upsertBar.run(symbol, dateStr, bar.open, bar.close, currency, dayPct, bar.volume ?? null);
+        count++;
+      }
+      return count;
+    });
+
+    const results: { symbol: string; days: number; error?: string }[] = [];
+
+    for (const symbol of symbols) {
+      try {
+        // Récupérer la devise depuis l'historique existant
+        const currencyRow = db.prepare(
+          'SELECT currency FROM daily_history WHERE symbol = ? AND currency IS NOT NULL LIMIT 1'
+        ).get(symbol) as { currency: string } | undefined;
+        const currency = currencyRow?.currency ?? 'USD';
+
+        const bars: any[] = await yf.historical(symbol, { period1, period2: new Date(), interval: '1d' });
+        const count = upsertSymbol(symbol, bars, currency);
+        results.push({ symbol, days: count });
+      } catch (e: any) {
+        results.push({ symbol, days: 0, error: e.message });
+      }
+    }
+
+    res.json({ message: 'Backfill terminé', results });
+  } catch (error) {
+    res.status(500).json({ error: 'Erreur lors du backfill historique' });
   }
 });
 

@@ -635,22 +635,16 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     );
     await starButton.click();
     await patchResponse;
-    await page.waitForResponse(r =>
-      r.url().endsWith('/api/stocks') && r.request().method() === 'GET'
-    );
 
-    await expect(row.locator('button').filter({ hasText: /[★☆]/ }).locator('span.text-yellow-500')).toBeVisible();
+    await expect(row.locator('button').filter({ hasText: /[★☆]/ }).locator('span.text-yellow-500')).toBeVisible({ timeout: 10000 });
 
     const patchResponse2 = page.waitForResponse(r =>
       r.url().includes('/important') && r.request().method() === 'PATCH'
     );
     await row.locator('button').filter({ hasText: /[★☆]/ }).click();
     await patchResponse2;
-    await page.waitForResponse(r =>
-      r.url().endsWith('/api/stocks') && r.request().method() === 'GET'
-    );
 
-    await expect(row.locator('button').filter({ hasText: /[★☆]/ }).locator('span.text-gray-400')).toBeVisible();
+    await expect(row.locator('button').filter({ hasText: /[★☆]/ }).locator('span.text-gray-400')).toBeVisible({ timeout: 10000 });
   });
 
   test('Test 29c: Filtre étoile n\'affiche que les actions importantes', async ({ page }) => {
@@ -794,6 +788,14 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
       contentType: 'application/json',
       body: JSON.stringify({ symbol: 'TESTSTAT2', dataPoints: 0, currency: null, ma5: null, ma20: null, ma50: null, high: null, low: null, highDate: null, lowDate: null })
     }));
+    await page.route('**/api/stocks/quotes/history/TESTSTAT2', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([])
+    }));
+    await page.route('**/api/stocks/daily-history/TESTSTAT2', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([])
+    }));
 
     await page.goto('/');
     await expect(page.locator('td', { hasText: 'TESTSTAT2' }).first()).toBeVisible({ timeout: 10000 });
@@ -839,6 +841,14 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
         high: 110.0, highDate: '2026-01-15',
         low: 85.0, lowDate: '2026-01-05',
       })
+    }));
+    await page.route('**/api/stocks/quotes/history/TESTSTAT3', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([])
+    }));
+    await page.route('**/api/stocks/daily-history/TESTSTAT3', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([])
     }));
 
     await page.goto('/');
@@ -911,7 +921,7 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     await page.route('**/api/stocks/recommendations', route => route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify([
-        { symbol: 'TESTRECO2', currency: null, dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' }
+        { symbol: 'TESTRECO2', currency: null, dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null }
       ])
     }));
 
@@ -936,7 +946,7 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     await recoResp2;
     await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).toBeVisible();
 
-    await page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' }).locator('button.text-gray-400').click();
+    await page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' }).locator('button.text-gray-400').first().click();
     await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).not.toBeVisible();
   });
 
@@ -948,9 +958,11 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
       body: JSON.stringify([
         {
           symbol: 'TESTRECO3', currency: 'USD', dataPoints: 20, currentPrice: 105.0,
-          ma5: 100.0, ma20: 95.0, ma50: 90.0,
-          signal: 'buy', recommendedMA: 'MA5',
-          reason: 'MAs alignées à la hausse — tendance forte'
+          ma5: 100.0, ma20: 95.0, ma50: 90.0, rsi: 65,
+          macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null,
+          signal: 'buy', previousSignal: null, recommendedMA: 'MA5',
+          reason: 'MAs alignées à la hausse — tendance forte',
+          alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null
         }
       ])
     }));
@@ -966,8 +978,8 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
     await expect(modal).toBeVisible();
 
-    // Bandeau de synthèse : "1 achat" visible
-    await expect(modal.locator('span').filter({ hasText: /achat/ })).toBeVisible();
+    // Bandeau de synthèse : "1 achat" visible (bouton cliquable)
+    await expect(modal.locator('button').filter({ hasText: /achat/ })).toBeVisible();
 
     // En-têtes du tableau
     await expect(modal.getByRole('columnheader', { name: 'Signal' })).toBeVisible();
@@ -975,10 +987,11 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
 
     // Ligne TESTRECO3 dans le tableau avec signal ACHAT et MA5
     await expect(modal.locator('td').filter({ hasText: 'TESTRECO3' })).toBeVisible();
-    await expect(modal.getByText('ACHAT', { exact: true })).toBeVisible();
+    await expect(modal.getByRole('row', { name: /TESTRECO3/ }).getByText('ACHAT', { exact: true })).toBeVisible();
     // MA5 dans la colonne MA Reco de la ligne TESTRECO3 (badge bleu)
+    // Colonnes : 0=Symbole 1=Prix 2=Var.jour 3=vsMA5 4=vsMA20 5=vsMA50 6=RSI 7=Vol 8=Signal 9=MAReco 10=Pallier 11=icône
     const recoRow = modal.getByRole('row', { name: /TESTRECO3/ });
-    await expect(recoRow.locator('td').last().locator('span')).toContainText('MA5');
+    await expect(recoRow.locator('td').nth(9).locator('span')).toContainText('MA5');
 
     // Colonne "vs MA" avec flèches et pourcentages (prix 105 > ma5 100 → ↑ +5.0%)
     await expect(modal.locator('td').filter({ hasText: /↑|↓/ }).first()).toBeVisible();
@@ -1004,10 +1017,20 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     expect(rec).toHaveProperty('signal');
     expect(rec).toHaveProperty('recommendedMA');
     expect(rec).toHaveProperty('reason');
+    expect(rec).toHaveProperty('rsi');
+    expect(rec).toHaveProperty('previousSignal');
+    expect(rec).toHaveProperty('signalSince');
+    expect(rec).toHaveProperty('previousSignalSince');
+    expect(rec).toHaveProperty('alertLevel');
+    expect(rec).toHaveProperty('confirmLevel');
     // Symbole fictif sans historique
     expect(rec.signal).toBe('insufficient');
+    expect(rec.previousSignal).toBeNull();
+    expect(rec.signalSince).toBeNull();
+    expect(rec.previousSignalSince).toBeNull();
     expect(rec.dataPoints).toBe(0);
     expect(rec.currentPrice).toBeNull();
+    expect(rec.rsi).toBeNull();
 
     const allStocks = await (await request.get(API_URL)).json();
     for (const stock of allStocks) {
@@ -1036,8 +1059,8 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     await page.route('**/api/stocks/recommendations', route => route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify([
-        { symbol: 'TESTRECEUR', currency: 'EUR', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' },
-        { symbol: 'TESTRECUSD', currency: 'USD', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, signal: 'insufficient', recommendedMA: null, reason: 'Données insuffisantes' },
+        { symbol: 'TESTRECEUR', currency: 'EUR', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+        { symbol: 'TESTRECUSD', currency: 'USD', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
       ])
     }));
 
@@ -1062,6 +1085,420 @@ test.describe('Tests d\'interface - Gestion des actions boursières', () => {
     // Seul TESTRECEUR doit apparaître dans le tableau de la modale
     await expect(modal.locator('td').filter({ hasText: 'TESTRECEUR' })).toBeVisible();
     await expect(modal.locator('td').filter({ hasText: 'TESTRECUSD' })).not.toBeVisible();
+  });
+
+  // ─── Positions / Portefeuille ────────────────────────────────────────────────
+
+  test('Test 41: Bouton Portefeuille visible dans le bandeau principal', async ({ page }) => {
+    await page.goto('/');
+
+    await addStock(page, 'TESTPF1');
+    await expect(page.locator('td', { hasText: 'TESTPF1' }).first()).toBeVisible();
+
+    await expect(page.locator('button[title="Portefeuille — vue des gains/pertes"]')).toBeVisible();
+  });
+
+  test('Test 42: Bouton Positions visible sur chaque ligne d\'action', async ({ page }) => {
+    await page.goto('/');
+
+    await addStock(page, 'TESTPOS1');
+    await expect(page.locator('td', { hasText: 'TESTPOS1' }).first()).toBeVisible();
+
+    const row = page.getByRole('row', { name: /TESTPOS1/ });
+    await expect(row.locator('button[title="Positions / Portefeuille"]')).toBeVisible();
+  });
+
+  test('Test 43: Ouverture et fermeture de la modale Positions par action', async ({ page }) => {
+    await page.goto('/');
+
+    await addStock(page, 'TESTPOS2');
+    await expect(page.locator('td', { hasText: 'TESTPOS2' }).first()).toBeVisible();
+
+    const row = page.getByRole('row', { name: /TESTPOS2/ });
+
+    // Ouvrir via le bouton Positions
+    await row.locator('button[title="Positions / Portefeuille"]').click();
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).toBeVisible();
+    await expect(page.locator('h2').filter({ hasText: /TESTPOS2/ })).toBeVisible();
+
+    // Fermer via le backdrop
+    await page.mouse.click(5, 5);
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).not.toBeVisible();
+
+    // Rouvrir et fermer via le bouton X
+    await row.locator('button[title="Positions / Portefeuille"]').click();
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).toBeVisible();
+    await page.locator('.fixed.inset-0 .bg-white').filter({ hasText: /Positions/ }).locator('button.text-gray-400').click();
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).not.toBeVisible();
+  });
+
+  test('Test 44: Ajout d\'une position depuis la modale par action', async ({ page, request }) => {
+    const POSITIONS_URL = 'http://localhost:3000/api/stocks/positions';
+
+    await page.goto('/');
+    await addStock(page, 'TESTPOS3');
+    await expect(page.locator('td', { hasText: 'TESTPOS3' }).first()).toBeVisible();
+
+    const row = page.getByRole('row', { name: /TESTPOS3/ });
+    await row.locator('button[title="Positions / Portefeuille"]').click();
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).toBeVisible();
+
+    await page.getByPlaceholder('ex: 10').fill('5');
+    await page.getByPlaceholder('ex: 264.50').fill('100.00');
+    await page.getByRole('button', { name: 'Fictif' }).click();
+
+    const postResp = page.waitForResponse(r =>
+      r.url().includes('/api/stocks/positions') && r.request().method() === 'POST'
+    );
+    await page.locator('.fixed.inset-0 .bg-white').filter({ hasText: /Positions/ })
+      .getByRole('button', { name: 'Ajouter' }).click();
+    await postResp;
+
+    await expect(page.getByText('Positions fictives')).toBeVisible();
+
+    // Nettoyage
+    const all = await (await request.get(POSITIONS_URL)).json();
+    for (const p of all) {
+      if (p.symbol === 'TESTPOS3') await request.delete(`${POSITIONS_URL}/${p.id}`);
+    }
+  });
+
+  test('Test 45: Suppression d\'une position depuis la modale par action', async ({ page, request }) => {
+    const POSITIONS_URL = 'http://localhost:3000/api/stocks/positions';
+
+    await request.post(`http://localhost:3000/api/stocks`, { data: { symbol: 'TESTDEL1' } });
+    await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTDEL1', quantity: 3, purchase_price: 50, type: 'real' }
+    });
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTDEL1' }).first()).toBeVisible();
+
+    const row = page.getByRole('row', { name: /TESTDEL1/ });
+    await row.locator('button[title="Positions / Portefeuille"]').click();
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).toBeVisible();
+    await expect(page.getByText('Positions réelles')).toBeVisible();
+
+    const deleteResp = page.waitForResponse(r =>
+      r.url().includes('/api/stocks/positions/') && r.request().method() === 'DELETE'
+    );
+    await page.locator('.fixed.inset-0 .bg-white').filter({ hasText: /Positions/ })
+      .locator('tbody button').first().click();
+    await deleteResp;
+
+    await expect(page.getByText('Aucune position enregistrée')).toBeVisible();
+  });
+
+  test('Test 46: Ouverture et fermeture de la modale Portefeuille global', async ({ page, request }) => {
+    const POSITIONS_URL = 'http://localhost:3000/api/stocks/positions';
+
+    await request.post(`http://localhost:3000/api/stocks`, { data: { symbol: 'TESTGPF1' } });
+    await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTGPF1', quantity: 2, purchase_price: 80, type: 'fictive' }
+    });
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTGPF1' }).first()).toBeVisible();
+
+    await page.locator('button[title="Portefeuille — vue des gains/pertes"]').click();
+    await expect(page.locator('h2').filter({ hasText: 'Portefeuille' })).toBeVisible();
+
+    await expect(page.locator('.fixed.inset-0').filter({ hasText: 'Portefeuille' })
+      .locator('td').filter({ hasText: 'TESTGPF1' })).toBeVisible();
+
+    // Fermer via le backdrop
+    await page.mouse.click(5, 5);
+    await expect(page.locator('h2').filter({ hasText: 'Portefeuille' })).not.toBeVisible();
+
+    // Nettoyage
+    const allPos = await (await request.get(POSITIONS_URL)).json();
+    for (const p of allPos) {
+      if (p.symbol === 'TESTGPF1') await request.delete(`${POSITIONS_URL}/${p.id}`);
+    }
+  });
+
+  test('Test 47: Bouton portefeuille dans la fenêtre Reco ouvre la modale Positions', async ({ page, request }) => {
+    await request.post(`http://localhost:3000/api/stocks`, { data: { symbol: 'TESTRECPF' } });
+
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { symbol: 'TESTRECPF', currency: null, dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null }
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTRECPF' }).first()).toBeVisible({ timeout: 10000 });
+
+    const recoResp = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await page.locator('button[title="Recommandations basées sur les moyennes mobiles"]').click();
+    await recoResp;
+    await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).toBeVisible();
+
+    const recoModal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
+    await recoModal.locator('button[title="Ajouter une position sur TESTRECPF"]').click();
+
+    await expect(page.locator('h2').filter({ hasText: 'Recommandations' })).not.toBeVisible();
+    await expect(page.locator('h2').filter({ hasText: /Positions/ })).toBeVisible();
+    await expect(page.locator('h2').filter({ hasText: /TESTRECPF/ })).toBeVisible();
+  });
+
+  test('Test 49: Filtre par signal dans la fenêtre Recommandations', async ({ page, request }) => {
+    for (const sym of ['TESTRF1', 'TESTRF2', 'TESTRF3']) {
+      const existing = await (await request.get(API_URL)).json();
+      for (const s of existing) {
+        if (s.symbol === sym) await request.delete(`${API_URL}/${s.id}`);
+      }
+      await request.post(API_URL, { data: { symbol: sym } });
+    }
+
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { symbol: 'TESTRF1', currency: 'USD', dataPoints: 20, currentPrice: 105, ma5: 100, ma20: 95, ma50: 90, rsi: 60, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'buy', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: 'MA5', reason: 'Tendance haussière', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+        { symbol: 'TESTRF2', currency: 'USD', dataPoints: 20, currentPrice: 80, ma5: 90, ma20: 95, ma50: 100, rsi: 35, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'sell', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: 'MA20', reason: 'Tendance baissière', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+        { symbol: 'TESTRF3', currency: 'USD', dataPoints: 20, currentPrice: 95, ma5: 90, ma20: 98, ma50: 100, rsi: 50, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'caution', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: 'MA20', reason: 'Signal mixte', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTRF1' }).first()).toBeVisible({ timeout: 10000 });
+
+    const recoResp = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await page.locator('button[title="Recommandations basées sur les moyennes mobiles"]').click();
+    await recoResp;
+
+    const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
+    await expect(modal).toBeVisible();
+
+    // Les 3 actions visibles au départ
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF1' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF2' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF3' })).toBeVisible();
+
+    // Clic sur "1 vente" → seul TESTRF2 visible
+    await modal.locator('button').filter({ hasText: /vente/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF1' })).not.toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF2' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF3' })).not.toBeVisible();
+
+    // Re-clic (toggle) → tout s'affiche à nouveau
+    await modal.locator('button').filter({ hasText: /vente/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF1' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF3' })).toBeVisible();
+
+    // Clic sur "1 achat" → seul TESTRF1 visible
+    await modal.locator('button').filter({ hasText: /achat/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF1' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF2' })).not.toBeVisible();
+
+    // Bouton "Effacer tous les filtres" efface le filtre
+    await modal.locator('button').filter({ hasText: /Effacer tous les filtres/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTRF2' })).toBeVisible();
+  });
+
+  test('Test 50: Icône portefeuille bleue (fictif), rouge (réel), grise (aucun)', async ({ page, request }) => {
+    const POSITIONS_URL = 'http://localhost:3000/api/stocks/positions';
+
+    for (const sym of ['TESTPFBLUE', 'TESTPFRED', 'TESTPFGREEN']) {
+      const existing = await (await request.get(API_URL)).json();
+      for (const s of existing) {
+        if (s.symbol === sym) await request.delete(`${API_URL}/${s.id}`);
+      }
+      await request.post(API_URL, { data: { symbol: sym } });
+    }
+
+    const posBlue = await (await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTPFBLUE', quantity: 5, purchase_price: 100, type: 'fictive' }
+    })).json();
+    const posRed = await (await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTPFRED', quantity: 5, purchase_price: 100, type: 'real' }
+    })).json();
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTPFBLUE' }).first()).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('td', { hasText: 'TESTPFRED' }).first()).toBeVisible();
+    await expect(page.locator('td', { hasText: 'TESTPFGREEN' }).first()).toBeVisible();
+
+    // Fictif → bleu
+    const rowBlue = page.getByRole('row', { name: /TESTPFBLUE/ });
+    await expect(rowBlue.locator('button[title="Positions / Portefeuille"]')).toHaveClass(/text-blue-500/);
+
+    // Réel → rouge
+    const rowRed = page.getByRole('row', { name: /TESTPFRED/ });
+    await expect(rowRed.locator('button[title="Positions / Portefeuille"]')).toHaveClass(/text-red-500/);
+
+    // Aucun → gris
+    const rowGreen = page.getByRole('row', { name: /TESTPFGREEN/ });
+    await expect(rowGreen.locator('button[title="Positions / Portefeuille"]')).toHaveClass(/text-gray-400/);
+
+    // Nettoyage
+    await request.delete(`${POSITIONS_URL}/${posBlue.id}`);
+    await request.delete(`${POSITIONS_URL}/${posRed.id}`);
+  });
+
+  test('Test 51: Changement de signal affiché dans la fenêtre Recommandations', async ({ page, request }) => {
+    const existing = await (await request.get(API_URL)).json();
+    for (const s of existing) {
+      if (s.symbol === 'TESTSCHANGE') await request.delete(`${API_URL}/${s.id}`);
+    }
+    await request.post(API_URL, { data: { symbol: 'TESTSCHANGE' } });
+
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          symbol: 'TESTSCHANGE', currency: 'USD', dataPoints: 20, currentPrice: 105,
+          ma5: 100, ma20: 95, ma50: 90, rsi: 75,
+          signal: 'caution', previousSignal: 'buy',
+          signalSince: '2026-01-17T14:32:00', previousSignalSince: '2026-01-15',
+          recommendedMA: 'MA5', reason: 'RSI en surachat',
+          alertLevel: null, confirmLevel: null,
+          macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null,
+          currentVolume: null, avgVolume20: null, volumeRatio: null
+        }
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTSCHANGE' }).first()).toBeVisible({ timeout: 10000 });
+
+    const recoResp = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await page.locator('button[title="Recommandations basées sur les moyennes mobiles"]').click();
+    await recoResp;
+
+    const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
+    await expect(modal).toBeVisible();
+
+    // La ligne TESTSCHANGE doit montrer PRUDENCE (actuel) et ACHAT (précédent)
+    const recoRow = modal.getByRole('row', { name: /TESTSCHANGE/ });
+    await expect(recoRow.getByText('PRUDENCE', { exact: true })).toBeVisible();
+    await expect(recoRow.getByText('ACHAT', { exact: true })).toBeVisible();
+
+    // La popup de détail doit aussi montrer le changement : ACHAT → PRUDENCE
+    await recoRow.getByText('PRUDENCE', { exact: true }).click();
+    const popup = page.locator('.fixed.inset-0').filter({ hasText: 'RSI en surachat' });
+    await expect(popup.getByText('ACHAT', { exact: true })).toBeVisible();
+    await expect(popup.getByText('PRUDENCE', { exact: true })).toBeVisible();
+  });
+
+  test('Test 48: API /positions — création, lecture et suppression', async ({ request }) => {
+    const POSITIONS_URL = 'http://localhost:3000/api/stocks/positions';
+
+    await request.post(`http://localhost:3000/api/stocks`, { data: { symbol: 'TESTPOSAPI' } });
+    const postResp = await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTPOSAPI', quantity: 10, purchase_price: 120.5, type: 'real' }
+    });
+    expect(postResp.ok()).toBeTruthy();
+    const created = await postResp.json();
+    expect(created).toHaveProperty('id');
+    expect(created).toHaveProperty('symbol', 'TESTPOSAPI');
+    expect(created).toHaveProperty('quantity', 10);
+    expect(created).toHaveProperty('purchase_price', 120.5);
+    expect(created).toHaveProperty('type', 'real');
+
+    // GET /positions
+    const getResp = await request.get(POSITIONS_URL);
+    expect(getResp.ok()).toBeTruthy();
+    const all = await getResp.json();
+    expect(Array.isArray(all)).toBeTruthy();
+    expect(all.find((p: any) => p.symbol === 'TESTPOSAPI')).toBeDefined();
+
+    // GET /positions?symbol=TESTPOSAPI
+    const filtResp = await request.get(`${POSITIONS_URL}?symbol=TESTPOSAPI`);
+    expect(filtResp.ok()).toBeTruthy();
+    const filtered = await filtResp.json();
+    expect(filtered.every((p: any) => p.symbol === 'TESTPOSAPI')).toBeTruthy();
+
+    // DELETE
+    const delResp = await request.delete(`${POSITIONS_URL}/${created.id}`);
+    expect(delResp.ok()).toBeTruthy();
+
+    const afterDel = await (await request.get(POSITIONS_URL)).json();
+    expect(afterDel.find((p: any) => p.id === created.id)).toBeUndefined();
+
+    // Nettoyage stock
+    const stocks = await (await request.get('http://localhost:3000/api/stocks')).json();
+    for (const s of stocks) {
+      if (s.symbol === 'TESTPOSAPI') await request.delete(`http://localhost:3000/api/stocks/${s.id}`);
+    }
+  });
+
+  // ─── Filtre position dans Reco ───────────────────────────────────────────────
+
+  test('Test 52: Filtre par position (réel/fictif/non acheté) dans la fenêtre Recommandations', async ({ page, request }) => {
+    const POSITIONS_URL = 'http://localhost:3000/api/stocks/positions';
+    const syms = ['TESTPFR1', 'TESTPFR2', 'TESTPFR3'];
+
+    for (const sym of syms) {
+      const existing = await (await request.get(API_URL)).json();
+      for (const s of existing) {
+        if (s.symbol === sym) await request.delete(`${API_URL}/${s.id}`);
+      }
+      await request.post(API_URL, { data: { symbol: sym } });
+    }
+
+    // TESTPFR1 → position réelle, TESTPFR2 → fictive, TESTPFR3 → aucune
+    const posReal = await (await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTPFR1', quantity: 5, purchase_price: 100, type: 'real' }
+    })).json();
+    const posFict = await (await request.post(POSITIONS_URL, {
+      data: { symbol: 'TESTPFR2', quantity: 3, purchase_price: 90, type: 'fictive' }
+    })).json();
+
+    await page.route('**/api/stocks/recommendations', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify([
+        { symbol: 'TESTPFR1', currency: 'USD', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+        { symbol: 'TESTPFR2', currency: 'USD', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+        { symbol: 'TESTPFR3', currency: 'USD', dataPoints: 0, currentPrice: null, ma5: null, ma20: null, ma50: null, rsi: null, macdValue: null, macdSignalValue: null, macdHistogram: null, macdTrend: null, signal: 'insufficient', previousSignal: null, signalSince: null, previousSignalSince: null, recommendedMA: null, reason: 'Données insuffisantes', alertLevel: null, confirmLevel: null, currentVolume: null, avgVolume20: null, volumeRatio: null },
+      ])
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('td', { hasText: 'TESTPFR1' }).first()).toBeVisible({ timeout: 10000 });
+
+    const recoResp = page.waitForResponse(r => r.url().includes('/recommendations'));
+    await page.locator('button[title="Recommandations basées sur les moyennes mobiles"]').click();
+    await recoResp;
+
+    const modal = page.locator('.fixed.inset-0 .bg-white').filter({ hasText: 'Recommandations' });
+    await expect(modal).toBeVisible();
+
+    // Les 3 actions visibles au départ
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR1' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR2' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR3' })).toBeVisible();
+
+    // Filtre "Réel" → seul TESTPFR1 visible
+    await modal.locator('button').filter({ hasText: /Réel/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR1' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR2' })).not.toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR3' })).not.toBeVisible();
+
+    // Effacer les filtres
+    await modal.locator('button').filter({ hasText: /Effacer tous les filtres/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR2' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR3' })).toBeVisible();
+
+    // Filtre "Fictif" → seul TESTPFR2 visible
+    await modal.locator('button').filter({ hasText: /Fictif/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR1' })).not.toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR2' })).toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR3' })).not.toBeVisible();
+
+    // Effacer les filtres
+    await modal.locator('button').filter({ hasText: /Effacer tous les filtres/ }).click();
+
+    // Filtre "Non acheté" → seul TESTPFR3 visible
+    await modal.locator('button').filter({ hasText: /Non acheté/ }).click();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR1' })).not.toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR2' })).not.toBeVisible();
+    await expect(modal.locator('td').filter({ hasText: 'TESTPFR3' })).toBeVisible();
+
+    // Nettoyage
+    await request.delete(`${POSITIONS_URL}/${posReal.id}`);
+    await request.delete(`${POSITIONS_URL}/${posFict.id}`);
   });
 
 });

@@ -15,6 +15,7 @@ interface Quote {
   refreshed_at: string;
   dailyTrend: number | null;
   name: string;
+  volume: number | null;
 }
 
 interface QuoteHistoryEntry {
@@ -35,7 +36,30 @@ interface DailyHistoryEntry {
   close_price: number;
   currency: string;
   day_change_percent: number;
+  volume: number | null;
 }
+
+const formatVolume = (v: number): string => {
+  if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}G`;
+  if (v >= 1_000_000)     return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000)         return `${(v / 1_000).toFixed(0)}K`;
+  return `${v}`;
+};
+
+const signalLabel = (s: string): string => {
+  if (s === 'buy')         return 'ACHAT';
+  if (s === 'sell')        return 'VENTE';
+  if (s === 'caution')     return 'PRUDENCE';
+  if (s === 'insufficient') return 'N/A';
+  return s.toUpperCase();
+};
+
+const signalColors: Record<string, string> = {
+  buy:         'bg-green-100 text-green-700',
+  sell:        'bg-red-100 text-red-700',
+  caution:     'bg-yellow-100 text-yellow-700',
+  insufficient:'bg-gray-100 text-gray-400',
+};
 
 interface Position {
   id: number;
@@ -57,7 +81,17 @@ interface Recommendation {
   ma20: number | null;
   ma50: number | null;
   rsi: number | null;
+  macdValue: number | null;
+  macdSignalValue: number | null;
+  macdHistogram: number | null;
+  macdTrend: 'bullish' | 'bearish' | 'neutral' | null;
+  currentVolume: number | null;
+  avgVolume20: number | null;
+  volumeRatio: number | null;
   signal: 'buy' | 'sell' | 'caution' | 'insufficient';
+  previousSignal: string | null;
+  previousSignalSince: string | null;
+  signalSince: string | null;
   recommendedMA: 'MA5' | 'MA20' | 'MA50' | null;
   reason: string;
   alertLevel: BuyBackLevel | null;
@@ -132,6 +166,48 @@ function buildTrendSequences(entries: QuoteHistoryEntry[]): TrendSequence[] {
   return sequences.reverse(); // most recent first
 }
 
+function calcRSI(prices: number[], period = 14): number | null {
+  if (prices.length < period + 1) return null;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff > 0) avgGain += diff; else avgLoss -= diff;
+  }
+  avgGain /= period; avgLoss /= period;
+  for (let i = period + 1; i < prices.length; i++) {
+    const diff = prices[i] - prices[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
+  }
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+function calcEMA(data: number[], period: number): number[] {
+  if (data.length < period) return [];
+  const k = 2 / (period + 1);
+  let val = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  const result = [val];
+  for (let i = period; i < data.length; i++) {
+    val = data[i] * k + val * (1 - k);
+    result.push(val);
+  }
+  return result;
+}
+
+function calcMACD(prices: number[]): { value: number; signal: number; histogram: number } | null {
+  const ema12 = calcEMA(prices, 12);
+  const ema26 = calcEMA(prices, 26);
+  // ema12[i] = prices[11+i], ema26[i] = prices[25+i] → offset = 14
+  if (ema12.length < 15 || ema26.length === 0) return null;
+  const macdLine = ema26.map((e26, i) => ema12[i + 14] - e26);
+  const signalLine = calcEMA(macdLine, 9);
+  if (signalLine.length === 0) return null;
+  const value = macdLine[macdLine.length - 1];
+  const signal = signalLine[signalLine.length - 1];
+  return { value, signal, histogram: value - signal };
+}
+
 function App() {
   const [stocks, setStocks] = useState<Stock[]>([]);
   const [symbol, setSymbol] = useState('');
@@ -153,6 +229,9 @@ function App() {
   const [statsSymbol, setStatsSymbol] = useState<string | null>(null);
   const [stats, setStats] = useState<StockStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [statsIntradayHistory, setStatsIntradayHistory] = useState<QuoteHistoryEntry[]>([]);
+  const [statsDailyHistory, setStatsDailyHistory] = useState<DailyHistoryEntry[]>([]);
+  const [statsPeriod, setStatsPeriod] = useState<'1W' | '1M' | 'ALL'>('1M');
   const [positionSymbol, setPositionSymbol] = useState<string | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [positionsLoading, setPositionsLoading] = useState(false);
@@ -166,9 +245,22 @@ function App() {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [recommendationsLoading, setRecommendationsLoading] = useState(false);
   const [recoDetail, setRecoDetail] = useState<Recommendation | null>(null);
+  const [recoSignalFilter, setRecoSignalFilter] = useState<'buy' | 'sell' | 'caution' | 'changed' | null>(null);
+  const [recoPositionFilter, setRecoPositionFilter] = useState<'real' | 'fictive' | 'none' | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoFlaggedRef = useRef(false);
+  const backfillDoneRef = useRef(false);
+  const showRecommendationsRef = useRef(false);
 
   const API_URL = 'http://localhost:3000/api/stocks';
+
+  const fetchBackfillHistory = async () => {
+    try {
+      await fetch(`${API_URL}/backfill-history`);
+    } catch {
+      // silencieux — non critique
+    }
+  };
 
   const fetchQuotes = async () => {
     try {
@@ -180,6 +272,9 @@ function App() {
       if (firstQuote?.refreshed_at) {
         setLastRefresh(firstQuote.refreshed_at);
       }
+      if (showRecommendationsRef.current) {
+        fetchRecommendations(true);
+      }
     } catch {
       // Silently fail - quotes are not critical
     } finally {
@@ -187,15 +282,35 @@ function App() {
     }
   };
 
+  // Sync ref pour éviter stale closure dans setInterval
+  useEffect(() => { showRecommendationsRef.current = showRecommendations; }, [showRecommendations]);
+
   // Charger les actions au démarrage
   useEffect(() => {
     fetchStocks();
+    fetch(`${API_URL}/positions`).then(r => r.json()).then(setAllPositions).catch(() => {});
   }, []);
+
+  // Auto-flag important : au démarrage, marquer comme importante toute action ayant une position
+  useEffect(() => {
+    if (autoFlaggedRef.current || stocks.length === 0 || allPositions.length === 0) return;
+    autoFlaggedRef.current = true;
+    const symbolsWithPos = new Set(allPositions.map(p => p.symbol));
+    const toFlag = stocks.filter(s => s.important !== 1 && s.id && symbolsWithPos.has(s.symbol));
+    if (toFlag.length > 0) {
+      Promise.all(toFlag.map(s => fetch(`${API_URL}/${s.id}/important`, { method: 'PATCH' })))
+        .then(() => fetchStocks());
+    }
+  }, [stocks, allPositions]);
 
   // Rafraîchir les cours toutes les 10 minutes
   useEffect(() => {
     if (stocks.length > 0) {
       fetchQuotes();
+      if (!backfillDoneRef.current) {
+        backfillDoneRef.current = true;
+        fetchBackfillHistory();
+      }
       intervalRef.current = setInterval(fetchQuotes, 600000);
     }
     return () => {
@@ -335,20 +450,28 @@ function App() {
   const openStats = async (sym: string) => {
     setStatsLoading(true);
     setStatsSymbol(sym);
+    setStatsIntradayHistory([]);
+    setStatsDailyHistory([]);
     try {
-      const response = await fetch(`${API_URL}/stats/${sym}`);
-      const data = await response.json();
-      setStats(data);
+      const [statsRes, intradayRes, dailyRes] = await Promise.all([
+        fetch(`${API_URL}/stats/${sym}`),
+        fetch(`${API_URL}/quotes/history/${sym}`),
+        fetch(`${API_URL}/daily-history/${sym}`),
+      ]);
+      setStats(await statsRes.json());
+      setStatsIntradayHistory(await intradayRes.json());
+      setStatsDailyHistory(await dailyRes.json());
     } catch {
       setStats(null);
+      setStatsIntradayHistory([]);
+      setStatsDailyHistory([]);
     } finally {
       setStatsLoading(false);
     }
   };
 
-  const fetchRecommendations = async () => {
-    setRecommendationsLoading(true);
-    setShowRecommendations(true);
+  const fetchRecommendations = async (silent = false) => {
+    if (!silent) { setRecommendationsLoading(true); setShowRecommendations(true); }
     try {
       const response = await fetch(`${API_URL}/recommendations`);
       const data = await response.json();
@@ -356,7 +479,7 @@ function App() {
     } catch {
       setRecommendations([]);
     } finally {
-      setRecommendationsLoading(false);
+      if (!silent) setRecommendationsLoading(false);
     }
   };
 
@@ -387,14 +510,25 @@ function App() {
         body: JSON.stringify({ symbol: positionSymbol, quantity: qty, purchase_price: price, type: posType }),
       });
       setPosQty(''); setPosPrice('');
-      const res = await fetch(`${API_URL}/positions?symbol=${positionSymbol}`);
+      const [res, allRes] = await Promise.all([
+        fetch(`${API_URL}/positions?symbol=${positionSymbol}`),
+        fetch(`${API_URL}/positions`),
+      ]);
       setPositions(await res.json());
+      setAllPositions(await allRes.json());
+      // Auto-flag comme importante si ce n'est pas déjà le cas
+      const stock = stocks.find(s => s.symbol === positionSymbol);
+      if (stock?.id && stock.important !== 1) {
+        await fetch(`${API_URL}/${stock.id}/important`, { method: 'PATCH' });
+        fetchStocks();
+      }
     } catch { setPosError('Erreur lors de l\'ajout.'); }
   };
 
   const deletePosition = async (id: number) => {
     await fetch(`${API_URL}/positions/${id}`, { method: 'DELETE' });
     setPositions(prev => prev.filter(p => p.id !== id));
+    setAllPositions(prev => prev.filter(p => p.id !== id));
   };
 
   const openPortfolio = async () => {
@@ -489,7 +623,7 @@ function App() {
                   </svg>
                   Recommandations
                 </h2>
-                <button onClick={() => setShowRecommendations(false)} className="text-gray-400 hover:text-gray-600">
+                <button onClick={() => { setShowRecommendations(false); setRecoSignalFilter(null); setRecoPositionFilter(null); }} className="text-gray-400 hover:text-gray-600">
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
@@ -505,10 +639,34 @@ function App() {
 
                 if (displayed.length === 0) return <div className="text-center py-12 text-gray-400">Aucune donnée disponible</div>;
 
-                const actionable = displayed.filter(r => r.signal !== 'insufficient');
-                const buys = actionable.filter(r => r.signal === 'buy').length;
-                const sells = actionable.filter(r => r.signal === 'sell').length;
+                const countReal    = displayed.filter(r => allPositions.some(p => p.symbol === r.symbol && p.type === 'real')).length;
+                const countFictive = displayed.filter(r => allPositions.some(p => p.symbol === r.symbol && p.type === 'fictive') && !allPositions.some(p => p.symbol === r.symbol && p.type === 'real')).length;
+                const countNone    = displayed.filter(r => !allPositions.some(p => p.symbol === r.symbol)).length;
+
+                // 1er filtre : position
+                const filteredByPosition = recoPositionFilter === 'real'
+                  ? displayed.filter(r => allPositions.some(p => p.symbol === r.symbol && p.type === 'real'))
+                  : recoPositionFilter === 'fictive'
+                    ? displayed.filter(r => allPositions.some(p => p.symbol === r.symbol && p.type === 'fictive') && !allPositions.some(p => p.symbol === r.symbol && p.type === 'real'))
+                    : recoPositionFilter === 'none'
+                      ? displayed.filter(r => !allPositions.some(p => p.symbol === r.symbol))
+                      : displayed;
+
+                // Comptes signal calculés sur le sous-ensemble position
+                const actionable = filteredByPosition.filter(r => r.signal !== 'insufficient');
+                const buys    = actionable.filter(r => r.signal === 'buy').length;
+                const sells   = actionable.filter(r => r.signal === 'sell').length;
                 const cautions = actionable.filter(r => r.signal === 'caution').length;
+                const changed = filteredByPosition.filter(r => r.previousSignal && r.previousSignal !== r.signal).length;
+
+                // 2ème filtre : signal (appliqué sur le résultat du 1er)
+                const filteredDisplayed = recoSignalFilter === 'changed'
+                  ? filteredByPosition.filter(r => r.previousSignal && r.previousSignal !== r.signal)
+                  : recoSignalFilter
+                    ? filteredByPosition.filter(r => r.signal === recoSignalFilter)
+                    : filteredByPosition;
+
+                const hasFilter = recoPositionFilter !== null || recoSignalFilter !== null;
 
                 // Consensus MA
                 const maCounts: Record<string, number> = {};
@@ -530,12 +688,60 @@ function App() {
                   <>
                     {/* Bandeau de synthèse */}
                     <div className="mb-4 p-3 bg-violet-50 border border-violet-200 rounded-lg flex-shrink-0">
-                      <div className="flex flex-wrap items-center gap-4">
-                        <div className="flex gap-2">
-                          {buys > 0 && <span className="text-sm font-semibold text-green-700 bg-green-100 px-2 py-0.5 rounded">{buys} achat{buys > 1 ? 's' : ''}</span>}
-                          {cautions > 0 && <span className="text-sm font-semibold text-yellow-700 bg-yellow-100 px-2 py-0.5 rounded">{cautions} prudence</span>}
-                          {sells > 0 && <span className="text-sm font-semibold text-red-700 bg-red-100 px-2 py-0.5 rounded">{sells} vente{sells > 1 ? 's' : ''}</span>}
+                      <div className="flex flex-col gap-2">
+                        {/* Filtre 1 : position */}
+                        <div className="flex gap-2 flex-wrap items-center">
+                          <span className="text-xs text-violet-500 font-medium w-16 shrink-0">Position</span>
+                          <button
+                            onClick={() => setRecoPositionFilter(f => f === 'real' ? null : 'real')}
+                            className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoPositionFilter === 'real' ? 'bg-red-500 text-white ring-2 ring-red-300' : 'text-red-600 bg-red-50 hover:bg-red-100'}`}
+                          >🔴 Réel ({countReal})</button>
+                          <button
+                            onClick={() => setRecoPositionFilter(f => f === 'fictive' ? null : 'fictive')}
+                            className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoPositionFilter === 'fictive' ? 'bg-blue-500 text-white ring-2 ring-blue-300' : 'text-blue-600 bg-blue-50 hover:bg-blue-100'}`}
+                          >🔵 Fictif ({countFictive})</button>
+                          <button
+                            onClick={() => setRecoPositionFilter(f => f === 'none' ? null : 'none')}
+                            className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoPositionFilter === 'none' ? 'bg-gray-500 text-white ring-2 ring-gray-300' : 'text-gray-600 bg-gray-100 hover:bg-gray-200'}`}
+                          >⚪ Non acheté ({countNone})</button>
                         </div>
+                        {/* Filtre 2 : signal (comptes basés sur le filtre position) */}
+                        <div className="flex gap-2 flex-wrap items-center">
+                          <span className="text-xs text-violet-500 font-medium w-16 shrink-0">Signal</span>
+                          {buys > 0 && (
+                            <button
+                              onClick={() => setRecoSignalFilter(f => f === 'buy' ? null : 'buy')}
+                              className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoSignalFilter === 'buy' ? 'bg-green-600 text-white ring-2 ring-green-400' : 'text-green-700 bg-green-100 hover:bg-green-200'}`}
+                            >{buys} achat{buys > 1 ? 's' : ''}</button>
+                          )}
+                          {cautions > 0 && (
+                            <button
+                              onClick={() => setRecoSignalFilter(f => f === 'caution' ? null : 'caution')}
+                              className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoSignalFilter === 'caution' ? 'bg-yellow-500 text-white ring-2 ring-yellow-300' : 'text-yellow-700 bg-yellow-100 hover:bg-yellow-200'}`}
+                            >{cautions} prudence</button>
+                          )}
+                          {sells > 0 && (
+                            <button
+                              onClick={() => setRecoSignalFilter(f => f === 'sell' ? null : 'sell')}
+                              className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoSignalFilter === 'sell' ? 'bg-red-600 text-white ring-2 ring-red-400' : 'text-red-700 bg-red-100 hover:bg-red-200'}`}
+                            >{sells} vente{sells > 1 ? 's' : ''}</button>
+                          )}
+                          {changed > 0 && (
+                            <button
+                              onClick={() => setRecoSignalFilter(f => f === 'changed' ? null : 'changed')}
+                              className={`text-sm font-semibold px-2 py-0.5 rounded transition-all ${recoSignalFilter === 'changed' ? 'bg-orange-500 text-white ring-2 ring-orange-300' : 'text-orange-700 bg-orange-100 hover:bg-orange-200'}`}
+                            >⚡ {changed} changement{changed > 1 ? 's' : ''}</button>
+                          )}
+                        </div>
+                        {/* Bouton tout effacer */}
+                        {hasFilter && (
+                          <div>
+                            <button
+                              onClick={() => { setRecoSignalFilter(null); setRecoPositionFilter(null); }}
+                              className="text-xs text-gray-500 hover:text-gray-700 bg-white border border-gray-300 hover:border-gray-400 px-2 py-0.5 rounded transition-all"
+                            >✕ Effacer tous les filtres</button>
+                          </div>
+                        )}
                         {consensusMA && (
                           <div className="text-sm text-violet-800">
                             <span className="font-bold">MA recommandée : {consensusMA}</span>
@@ -552,10 +758,12 @@ function App() {
                           <tr className="text-gray-500 text-xs uppercase border-b">
                             <th className="py-2 text-left">Symbole</th>
                             <th className="py-2 text-right">Prix réf.</th>
+                            <th className="py-2 text-right">Var. jour</th>
                             <th className="py-2 text-right">vs MA5</th>
                             <th className="py-2 text-right">vs MA20</th>
                             <th className="py-2 text-right">vs MA50</th>
                             <th className="py-2 text-center">RSI</th>
+                            <th className="py-2 text-center">Vol.</th>
                             <th className="py-2 text-center">Signal</th>
                             <th className="py-2 text-center">MA Reco</th>
                             <th className="py-2 text-right">Pallier achat</th>
@@ -563,7 +771,7 @@ function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                          {displayed.map((r) => {
+                          {filteredDisplayed.map((r) => {
                             const cur = r.currentPrice;
                             const ccy = r.currency || 'USD';
                             return (
@@ -573,6 +781,13 @@ function App() {
                                   {cur !== null
                                     ? cur.toLocaleString('fr-FR', { style: 'currency', currency: ccy })
                                     : <span className="text-gray-400">—</span>}
+                                </td>
+                                <td className="py-2 text-right">
+                                  {quotes[r.symbol]?.changePercent != null ? (
+                                    <span className={`text-xs font-semibold ${quotes[r.symbol]!.changePercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                      {quotes[r.symbol]!.changePercent >= 0 ? '+' : ''}{quotes[r.symbol]!.changePercent.toFixed(2)}%
+                                    </span>
+                                  ) : <span className="text-gray-400">—</span>}
                                 </td>
                                 {([r.ma5, r.ma20, r.ma50] as (number | null)[]).map((ma, i) => {
                                   if (cur === null || ma === null) return <td key={i} className="py-2 text-right text-gray-400">—</td>;
@@ -593,10 +808,65 @@ function App() {
                                   ) : <span className="text-gray-400">—</span>}
                                 </td>
                                 <td className="py-2 text-center">
-                                  {r.signal === 'buy' && <span onClick={() => setRecoDetail(r)} className="text-xs font-bold px-2 py-0.5 rounded bg-green-100 text-green-700 cursor-pointer hover:bg-green-200">ACHAT</span>}
-                                  {r.signal === 'sell' && <span onClick={() => setRecoDetail(r)} className="text-xs font-bold px-2 py-0.5 rounded bg-red-100 text-red-700 cursor-pointer hover:bg-red-200">VENTE</span>}
-                                  {r.signal === 'caution' && <span onClick={() => setRecoDetail(r)} className="text-xs font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700 cursor-pointer hover:bg-yellow-200">PRUDENCE</span>}
-                                  {r.signal === 'insufficient' && <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">N/A</span>}
+                                  {r.volumeRatio !== null ? (
+                                    <div className="flex flex-col items-center gap-0.5">
+                                      <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${
+                                        r.volumeRatio > 1.5 ? 'bg-green-100 text-green-700' :
+                                        r.volumeRatio < 0.7 ? 'bg-red-100 text-red-700' :
+                                        'bg-gray-100 text-gray-600'
+                                      }`}>{r.volumeRatio.toFixed(1)}×</span>
+                                      {r.currentVolume !== null && (
+                                        <span className="text-xs text-gray-400">{formatVolume(r.currentVolume)}</span>
+                                      )}
+                                    </div>
+                                  ) : <span className="text-gray-400">—</span>}
+                                </td>
+                                <td className="py-2">
+                                  {(() => {
+                                    const fmtDate = (s: string) => new Date(s).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+                                    const fmtTime = (s: string) => new Date(s).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+                                    const signalBadge = (sig: string, clickable = false) => (
+                                      <span
+                                        onClick={clickable ? () => setRecoDetail(r) : undefined}
+                                        className={`text-xs font-bold px-2 py-0.5 rounded whitespace-nowrap ${signalColors[sig] ?? 'bg-gray-100 text-gray-400'} ${clickable ? 'cursor-pointer hover:opacity-80' : ''}`}
+                                      >{signalLabel(sig)}</span>
+                                    );
+
+                                    if (r.signal === 'insufficient') {
+                                      return <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-400">N/A</span>;
+                                    }
+
+                                    // Signal changé : ligne 1 = ANCIEN (date), ligne 2 = → NOUVEAU (date heure)
+                                    if (r.previousSignal && r.previousSignal !== r.signal) {
+                                      return (
+                                        <div className="flex flex-col gap-0.5">
+                                          <div className="flex items-center gap-1">
+                                            {signalBadge(r.previousSignal)}
+                                            {r.previousSignalSince && (
+                                              <span className="text-xs text-gray-400">({fmtDate(r.previousSignalSince)})</span>
+                                            )}
+                                          </div>
+                                          <div className="flex items-center gap-1">
+                                            <span className="text-gray-400 text-xs">→</span>
+                                            {signalBadge(r.signal, true)}
+                                            {r.signalSince && (
+                                              <span className="text-xs text-gray-400 whitespace-nowrap">{fmtDate(r.signalSince)} {fmtTime(r.signalSince)}</span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    }
+
+                                    // Signal inchangé : SIGNAL + depuis date
+                                    return (
+                                      <div className="flex flex-col gap-0.5">
+                                        {signalBadge(r.signal, true)}
+                                        {r.signalSince && (
+                                          <span className="text-xs text-gray-400">depuis {fmtDate(r.signalSince)}</span>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                                 </td>
                                 <td className="py-2 text-center">
                                   {r.recommendedMA ? (
@@ -636,7 +906,13 @@ function App() {
                                 <td className="py-2 text-center">
                                   <button
                                     onClick={() => { setShowRecommendations(false); openPositions(r.symbol); }}
-                                    className="text-emerald-600 hover:text-emerald-800 inline-flex items-center"
+                                    className={`inline-flex items-center ${
+                                      allPositions.some(p => p.symbol === r.symbol && p.type === 'real')
+                                        ? 'text-red-500 hover:text-red-700'
+                                        : allPositions.some(p => p.symbol === r.symbol && p.type === 'fictive')
+                                          ? 'text-blue-500 hover:text-blue-700'
+                                          : 'text-gray-400 hover:text-gray-600'
+                                    }`}
                                     title={`Ajouter une position sur ${r.symbol}`}
                                   >
                                     <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -661,7 +937,7 @@ function App() {
                           Guide de lecture
                         </summary>
 
-                        <div className="mt-3 space-y-3">
+                        <div className="mt-3 space-y-3 overflow-y-auto max-h-[60vh] pr-1">
 
                           {/* Signaux */}
                           <div>
@@ -703,6 +979,92 @@ function App() {
                                 </tr>
                               </tbody>
                             </table>
+                          </div>
+
+                          {/* MACD */}
+                          <div>
+                            <p className="font-semibold text-gray-500 uppercase tracking-wide mb-2">MACD(12,26,9) — Les 6 situations</p>
+                            <div className="space-y-2">
+
+                              {/* Situation 1 */}
+                              <div className="rounded border border-yellow-200 bg-yellow-50 p-2 text-xs">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>
+                                  <span className="text-gray-400">+</span>
+                                  <span className="font-semibold text-red-600">MACD &lt; Signal</span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>
+                                </div>
+                                <p className="text-gray-600">Structure haussière (MAs + RSI) mais le momentum n'est pas encore inversé : le prix rebondit avant que l'élan suive.</p>
+                                <p className="text-gray-800 font-medium mt-0.5">→ Attendre un croisement haussier du MACD avant d'entrer.</p>
+                              </div>
+
+                              {/* Situation 2 */}
+                              <div className="rounded border border-green-200 bg-green-50 p-2 text-xs">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>
+                                  <span className="text-gray-400">+</span>
+                                  <span className="font-semibold text-green-600">MACD &gt; Signal</span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-green-100 text-green-700">ACHAT confirmé</span>
+                                </div>
+                                <p className="text-gray-600">Les trois indicateurs sont alignés : structure, momentum et élan convergent à la hausse. Signal le plus fiable.</p>
+                                <p className="text-gray-800 font-medium mt-0.5">→ Entrer. Si croisement haussier récent : timing optimal, le momentum accélère.</p>
+                              </div>
+
+                              {/* Situation 3 */}
+                              <div className="rounded border border-yellow-200 bg-yellow-50 p-2 text-xs">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>
+                                  <span className="text-gray-400">+</span>
+                                  <span className="font-semibold text-green-600">MACD &gt; Signal</span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>
+                                </div>
+                                <p className="text-gray-600">Structure baissière (MAs + RSI) mais le MACD se retourne à la hausse : les acheteurs reprennent le contrôle du momentum.</p>
+                                <p className="text-gray-800 font-medium mt-0.5">→ Ne pas vendre. Surveiller : si le prix franchit une MA, c'est un retournement haussier.</p>
+                              </div>
+
+                              {/* Situation 4 */}
+                              <div className="rounded border border-red-200 bg-red-50 p-2 text-xs">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>
+                                  <span className="text-gray-400">+</span>
+                                  <span className="font-semibold text-red-600">MACD &lt; Signal</span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-red-100 text-red-700">VENTE confirmée</span>
+                                </div>
+                                <p className="text-gray-600">Structure, RSI et MACD alignés à la baisse. Le momentum baissier est réel et s'autoalimente.</p>
+                                <p className="text-gray-800 font-medium mt-0.5">→ Sortir. Si croisement baissier récent : l'accélération à la baisse commence, agir rapidement.</p>
+                              </div>
+
+                              {/* Situation 5 */}
+                              <div className="rounded border border-yellow-200 bg-yellow-50 p-2 text-xs">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>
+                                  <span className="text-gray-400">+</span>
+                                  <span className="font-semibold text-gray-700">Croisement ↑ ou ↓</span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE orientée</span>
+                                </div>
+                                <p className="text-gray-600">MAs contradictoires mais le MACD vient de changer de camp : premier signe de direction, pas encore une confirmation.</p>
+                                <p className="text-gray-800 font-medium mt-0.5">→ Mettre sous surveillance. Attendre que le prix franchisse la MA20 pour confirmer avant d'agir.</p>
+                              </div>
+
+                              {/* Situation 6 */}
+                              <div className="rounded border border-gray-200 bg-gray-50 p-2 text-xs">
+                                <div className="flex items-center gap-1 mb-1">
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>
+                                  <span className="text-gray-400">+</span>
+                                  <span className="font-semibold text-gray-600">MACD sans croisement</span>
+                                  <span className="text-gray-400 mx-1">→</span>
+                                  <span className="font-bold px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">PRUDENCE nuancée</span>
+                                </div>
+                                <p className="text-gray-600">Signaux mixtes partout. Le MACD donne une légère indication de direction mais sans franchissement net.</p>
+                                <p className="text-gray-800 font-medium mt-0.5">→ Aucune action. Attendre un signal plus tranché (croisement MACD + cassure d'une MA).</p>
+                              </div>
+
+                            </div>
                           </div>
 
                           {/* Moyennes mobiles */}
@@ -819,6 +1181,9 @@ function App() {
                           const pnlPct = pnl !== null && totalInvested > 0 ? (pnl / totalInvested) * 100 : null;
                           const gain = pnl !== null && pnl > 0 ? pnl : null;
                           const loss = pnl !== null && pnl < 0 ? pnl : null;
+                          const totalDayGain = cList.some(p => quotes[p.symbol]?.change != null)
+                            ? cList.reduce((s, p) => s + p.quantity * (quotes[p.symbol]?.change ?? 0), 0)
+                            : null;
 
                           return (
                             <div key={currency} className="bg-white rounded-lg px-4 py-3 shadow-sm">
@@ -826,8 +1191,20 @@ function App() {
                                 <span className="text-xs font-bold text-gray-400 uppercase">{currency}</span>
                                 <span className="text-xs text-gray-400">{cList.length} position{cList.length > 1 ? 's' : ''}</span>
                               </div>
-                              {/* Détail par position individuelle */}
-                              <table className="w-full text-sm mb-3">
+                              <div className="overflow-x-auto">
+                              <table className="text-sm" style={{ tableLayout: 'fixed', width: '940px' }}>
+                                <colgroup>
+                                  <col style={{ width: '70px' }} />
+                                  <col style={{ width: '90px' }} />
+                                  <col style={{ width: '50px' }} />
+                                  <col style={{ width: '100px' }} />
+                                  <col style={{ width: '100px' }} />
+                                  <col style={{ width: '100px' }} />
+                                  <col style={{ width: '100px' }} />
+                                  <col style={{ width: '140px' }} />
+                                  <col style={{ width: '140px' }} />
+                                  <col style={{ width: '50px' }} />
+                                </colgroup>
                                 <thead>
                                   <tr className="text-xs text-gray-400 uppercase border-b">
                                     <th className="pb-1 text-left">Action</th>
@@ -836,8 +1213,9 @@ function App() {
                                     <th className="pb-1 text-right">Prix achat</th>
                                     <th className="pb-1 text-right">Investi</th>
                                     <th className="pb-1 text-right">Valeur</th>
+                                    <th className="pb-1 text-right">Gain jour</th>
                                     <th className="pb-1 text-right">Gain</th>
-                                    <th className="pb-1 text-right">Perte</th>
+                                    <th className="pb-1 text-right pl-6">Perte</th>
                                     <th className="pb-1"></th>
                                   </tr>
                                 </thead>
@@ -848,10 +1226,12 @@ function App() {
                                     const val = cur !== null ? p.quantity * cur : null;
                                     const pl = val !== null ? val - inv : null;
                                     const plPct = pl !== null && inv > 0 ? (pl / inv) * 100 : null;
+                                    const dayChange = quotes[p.symbol]?.change ?? null;
+                                    const dayGain = dayChange !== null ? p.quantity * dayChange : null;
                                     const reco = recommendations.find(rec => rec.symbol === p.symbol);
                                     return (
                                       <tr key={p.id} className="hover:bg-gray-50">
-                                        <td className="py-1.5 font-semibold text-blue-600">{p.symbol}</td>
+                                        <td className="py-1.5 font-semibold text-blue-600 whitespace-nowrap">{p.symbol}</td>
                                         <td className="py-1.5 text-center">
                                           {reco ? (
                                             <>
@@ -866,11 +1246,14 @@ function App() {
                                         <td className="py-1.5 text-right text-gray-600 whitespace-nowrap">{fmt(p.purchase_price)}</td>
                                         <td className="py-1.5 text-right text-gray-500 whitespace-nowrap">{fmt(inv)}</td>
                                         <td className="py-1.5 text-right text-gray-700 whitespace-nowrap">{val !== null ? fmt(val) : '—'}</td>
+                                        <td className={`py-1.5 text-right font-semibold whitespace-nowrap ${dayGain === null ? 'text-gray-400' : dayGain >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                          {dayGain !== null ? `${dayGain >= 0 ? '+' : ''}${fmt(dayGain)}` : '—'}
+                                        </td>
                                         <td className="py-1.5 text-right font-semibold text-green-600 whitespace-nowrap">
                                           {pl !== null && pl > 0 ? `+${fmt(pl)}` : '—'}
                                           {plPct !== null && pl !== null && pl > 0 && <span className="text-xs font-normal ml-1">(+{plPct.toFixed(1)}%)</span>}
                                         </td>
-                                        <td className="py-1.5 text-right font-semibold text-red-600 whitespace-nowrap">
+                                        <td className="py-1.5 text-right font-semibold text-red-600 whitespace-nowrap pl-6">
                                           {pl !== null && pl < 0 ? fmt(pl) : '—'}
                                           {plPct !== null && pl !== null && pl < 0 && <span className="text-xs font-normal ml-1">({plPct.toFixed(1)}%)</span>}
                                         </td>
@@ -892,26 +1275,24 @@ function App() {
                                     );
                                   })}
                                 </tbody>
+                                <tfoot>
+                                  <tr className="border-t text-xs font-bold">
+                                    <td colSpan={4} className="pt-2 text-gray-400 uppercase tracking-wide">Total</td>
+                                    <td className="pt-2 text-right text-gray-800 whitespace-nowrap">{fmt(totalInvested)}</td>
+                                    <td className="pt-2 text-right text-gray-800 whitespace-nowrap">{hasAllPrices ? fmt(totalCurrent) : '—'}</td>
+                                    <td className={`pt-2 text-right whitespace-nowrap ${totalDayGain === null ? 'text-gray-400' : totalDayGain >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                      {totalDayGain !== null ? `${totalDayGain >= 0 ? '+' : ''}${fmt(totalDayGain)}` : '—'}
+                                    </td>
+                                    <td className="pt-2 text-right text-green-600 whitespace-nowrap">
+                                      {gain !== null ? <>+{fmt(gain)}<span className="font-normal ml-1">(+{pnlPct!.toFixed(1)}%)</span></> : '—'}
+                                    </td>
+                                    <td className="pt-2 text-right text-red-600 whitespace-nowrap pl-6">
+                                      {loss !== null ? <>{fmt(loss)}<span className="font-normal ml-1">({pnlPct!.toFixed(1)}%)</span></> : '—'}
+                                    </td>
+                                    <td />
+                                  </tr>
+                                </tfoot>
                               </table>
-
-                              {/* Total général */}
-                              <div className="border-t pt-2 grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-                                <div>
-                                  <p className="text-xs text-gray-400 mb-0.5">Total investi</p>
-                                  <p className="font-bold text-gray-800">{fmt(totalInvested)}</p>
-                                </div>
-                                {hasAllPrices && <div>
-                                  <p className="text-xs text-gray-400 mb-0.5">Valeur actuelle</p>
-                                  <p className="font-bold text-gray-800">{fmt(totalCurrent)}</p>
-                                </div>}
-                                {gain !== null && <div>
-                                  <p className="text-xs text-gray-400 mb-0.5">Gain total</p>
-                                  <p className="font-bold text-green-600">+{fmt(gain)}<span className="text-xs font-normal ml-1">(+{pnlPct!.toFixed(1)}%)</span></p>
-                                </div>}
-                                {loss !== null && <div>
-                                  <p className="text-xs text-gray-400 mb-0.5">Perte totale</p>
-                                  <p className="font-bold text-red-600">{fmt(loss)}<span className="text-xs font-normal ml-1">({pnlPct!.toFixed(1)}%)</span></p>
-                                </div>}
                               </div>
                             </div>
                           );
@@ -1110,11 +1491,15 @@ function App() {
             >
               {/* En-tête */}
               <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-lg font-bold text-blue-600">{recoDetail.symbol}</span>
-                  {recoDetail.signal === 'buy' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-green-100 text-green-700">ACHAT</span>}
-                  {recoDetail.signal === 'sell' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-red-100 text-red-700">VENTE</span>}
-                  {recoDetail.signal === 'caution' && <span className="text-xs font-bold px-2 py-0.5 rounded bg-yellow-100 text-yellow-700">PRUDENCE</span>}
+                  {recoDetail.previousSignal && recoDetail.previousSignal !== recoDetail.signal && (
+                    <>
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${signalColors[recoDetail.previousSignal] ?? 'bg-gray-100 text-gray-400'}`}>{signalLabel(recoDetail.previousSignal)}</span>
+                      <span className="text-gray-400 text-xs">→</span>
+                    </>
+                  )}
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded ${signalColors[recoDetail.signal]}`}>{signalLabel(recoDetail.signal)}</span>
                 </div>
                 <button onClick={() => setRecoDetail(null)} className="text-gray-400 hover:text-gray-600">
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1156,6 +1541,92 @@ function App() {
                   </span>
                 </div>
               )}
+
+              {/* MACD */}
+              {recoDetail.macdTrend !== null && recoDetail.macdValue !== null && recoDetail.macdSignalValue !== null && recoDetail.macdHistogram !== null && (
+                <div className="mb-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="text-sm text-gray-500">MACD(12,26,9)</span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                      recoDetail.macdTrend === 'bullish' ? 'bg-green-100 text-green-700' :
+                      recoDetail.macdTrend === 'bearish' ? 'bg-red-100 text-red-700' :
+                      'bg-gray-100 text-gray-600'
+                    }`}>
+                      {recoDetail.macdTrend === 'bullish' ? 'Momentum haussier' : recoDetail.macdTrend === 'bearish' ? 'Momentum baissier' : 'Neutre'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                      <div className="text-gray-400 mb-0.5">MACD</div>
+                      <div className={`font-bold ${recoDetail.macdValue > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {recoDetail.macdValue.toFixed(3)}
+                      </div>
+                    </div>
+                    <div className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                      <div className="text-gray-400 mb-0.5">Signal</div>
+                      <div className="font-bold text-gray-700">{recoDetail.macdSignalValue.toFixed(3)}</div>
+                    </div>
+                    <div className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                      <div className="text-gray-400 mb-0.5">Histogramme</div>
+                      <div className={`font-bold ${recoDetail.macdHistogram > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        {recoDetail.macdHistogram.toFixed(3)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Volume */}
+              <div className="mb-4">
+                <div className="flex items-center gap-3 mb-2">
+                  <span className="text-sm text-gray-500">Volume</span>
+                  {recoDetail.volumeRatio !== null ? (
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                      recoDetail.volumeRatio > 2.0 ? 'bg-green-200 text-green-800' :
+                      recoDetail.volumeRatio > 1.5 ? 'bg-green-100 text-green-700' :
+                      recoDetail.volumeRatio < 0.7 ? 'bg-red-100 text-red-700' :
+                      'bg-gray-100 text-gray-600'
+                    }`}>
+                      {recoDetail.volumeRatio > 2.0 ? 'Volume exceptionnel' :
+                       recoDetail.volumeRatio > 1.5 ? 'Volume élevé' :
+                       recoDetail.volumeRatio < 0.7 ? 'Volume faible' : 'Volume normal'}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-gray-400 italic">Rafraîchir les cours pour charger les données</span>
+                  )}
+                </div>
+                {recoDetail.volumeRatio !== null && recoDetail.currentVolume !== null && recoDetail.avgVolume20 !== null ? (
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                      <div className="text-gray-400 mb-0.5">Actuel</div>
+                      <div className="font-bold text-gray-700">{formatVolume(recoDetail.currentVolume)}</div>
+                    </div>
+                    <div className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                      <div className="text-gray-400 mb-0.5">Moy. 20j</div>
+                      <div className="font-bold text-gray-700">{formatVolume(recoDetail.avgVolume20)}</div>
+                    </div>
+                    <div className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                      <div className="text-gray-400 mb-0.5">Ratio</div>
+                      <div className={`font-bold ${
+                        recoDetail.volumeRatio > 1.5 ? 'text-green-600' :
+                        recoDetail.volumeRatio < 0.7 ? 'text-red-600' :
+                        'text-gray-700'
+                      }`}>
+                        {recoDetail.volumeRatio.toFixed(2)}×
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    {(['Actuel', 'Moy. 20j', 'Ratio'] as const).map(label => (
+                      <div key={label} className="bg-gray-50 rounded px-2 py-1.5 text-center">
+                        <div className="text-gray-400 mb-0.5">{label}</div>
+                        <div className="text-gray-300 font-bold">—</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {/* Données chiffrées */}
               <div className="space-y-2 text-sm">
@@ -1233,10 +1704,10 @@ function App() {
         {statsSymbol && (
           <div
             className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-            onClick={() => { setStatsSymbol(null); setStats(null); }}
+            onClick={() => { setStatsSymbol(null); setStats(null); setStatsIntradayHistory([]); setStatsDailyHistory([]); }}
           >
             <div
-              className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4"
+              className="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-4">
@@ -1247,7 +1718,7 @@ function App() {
                   )}
                 </h2>
                 <button
-                  onClick={() => { setStatsSymbol(null); setStats(null); }}
+                  onClick={() => { setStatsSymbol(null); setStats(null); setStatsIntradayHistory([]); setStatsDailyHistory([]); }}
                   className="text-gray-400 hover:text-gray-600"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1270,6 +1741,19 @@ function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
+                      {quotes[statsSymbol]?.price != null && (
+                        <tr className="bg-gray-50">
+                          <td className="py-2 font-semibold text-gray-800">Cours du jour</td>
+                          <td className="py-2 text-right font-bold text-gray-900">
+                            {quotes[statsSymbol]!.price.toLocaleString('fr-FR', { style: 'currency', currency: stats.currency || 'USD' })}
+                          </td>
+                          <td className="py-2 text-right">
+                            <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${quotes[statsSymbol]!.change >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                              {quotes[statsSymbol]!.change >= 0 ? '+' : ''}{quotes[statsSymbol]!.changePercent.toFixed(2)}%
+                            </span>
+                          </td>
+                        </tr>
+                      )}
                       {([['MA5', stats.ma5], ['MA20', stats.ma20], ['MA50', stats.ma50]] as [string, number | null][]).map(([label, value]) => {
                         const currentPrice = quotes[statsSymbol]?.price ?? null;
                         const above = currentPrice !== null && value !== null ? currentPrice > value : null;
@@ -1317,7 +1801,233 @@ function App() {
                       </tr>
                     </tbody>
                   </table>
-                  <p className="mt-4 text-xs text-gray-400 text-right">Basé sur {stats.dataPoints} jour{stats.dataPoints > 1 ? 's' : ''} de données</p>
+                  <p className="mt-3 text-xs text-gray-400 text-right">Basé sur {stats.dataPoints} jour{stats.dataPoints > 1 ? 's' : ''} de données</p>
+
+                  {/* RSI & MACD */}
+                  {statsDailyHistory.length > 0 && (() => {
+                    const chronoPrices = [...statsDailyHistory].reverse().map(e => e.close_price);
+                    const rsi = calcRSI(chronoPrices);
+                    const macd = calcMACD(chronoPrices);
+                    if (rsi === null && macd === null) return null;
+                    const rsiColor = rsi !== null ? (rsi > 70 ? 'text-red-600' : rsi < 30 ? 'text-green-600' : 'text-gray-800') : '';
+                    const rsiBarColor = rsi !== null ? (rsi > 70 ? '#dc2626' : rsi < 30 ? '#16a34a' : '#6366f1') : '';
+                    const rsiLabel = rsi !== null ? (rsi > 70 ? 'Suracheté' : rsi < 30 ? 'Survendu' : 'Neutre') : '';
+                    const rsiLabelCls = rsi !== null ? (rsi > 70 ? 'bg-red-100 text-red-700' : rsi < 30 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500') : '';
+                    return (
+                      <div className="mt-4 grid grid-cols-2 gap-3">
+                        {rsi !== null && (
+                          <div className="bg-gray-50 rounded-lg p-3">
+                            <div className="text-xs text-gray-500 mb-1">RSI (14)</div>
+                            <div className={`text-2xl font-bold ${rsiColor}`}>{rsi.toFixed(1)}</div>
+                            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${rsiLabelCls}`}>{rsiLabel}</span>
+                            <div className="mt-2 h-2 bg-gray-200 rounded-full overflow-hidden">
+                              <div className="h-full rounded-full transition-all" style={{ width: `${rsi}%`, backgroundColor: rsiBarColor }} />
+                            </div>
+                            <div className="flex justify-between text-xs text-gray-400 mt-0.5">
+                              <span>0</span><span>30</span><span>70</span><span>100</span>
+                            </div>
+                          </div>
+                        )}
+                        {macd !== null && (
+                          <div className="bg-gray-50 rounded-lg p-3">
+                            <div className="text-xs text-gray-500 mb-2">MACD (12/26/9)</div>
+                            <div className="space-y-1.5 text-sm">
+                              <div className="flex justify-between">
+                                <span className="text-gray-500">Valeur</span>
+                                <span className={`font-semibold ${macd.value >= 0 ? 'text-green-600' : 'text-red-600'}`}>{macd.value.toFixed(3)}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-500">Signal</span>
+                                <span className="font-medium text-gray-700">{macd.signal.toFixed(3)}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-500">Histogramme</span>
+                                <span className={`font-semibold ${macd.histogram >= 0 ? 'text-green-600' : 'text-red-600'}`}>{macd.histogram.toFixed(3)}</span>
+                              </div>
+                            </div>
+                            <span className={`mt-2 inline-block text-xs font-medium px-1.5 py-0.5 rounded ${macd.histogram >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                              {macd.histogram >= 0 ? 'Haussier' : 'Baissier'}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Sélecteur de période */}
+                  {statsDailyHistory.length > 0 && (() => {
+                    const periodDays = statsPeriod === '1W' ? 7 : statsPeriod === '1M' ? 30 : undefined;
+                    const filtered = (periodDays !== undefined ? statsDailyHistory.slice(0, periodDays) : statsDailyHistory).slice().reverse();
+
+                    // Dimensions et marges
+                    const W = 460, H = 150;
+                    const LM = 48, RM = 8, TM = 8, BM = 24;
+                    const cx1 = LM, cx2 = W - RM, cy1 = TM, cy2 = H - BM;
+                    const CW = cx2 - cx1, CH = cy2 - cy1;
+
+                    // Données graphe cours
+                    const prices = filtered.map(e => e.close_price);
+                    const minP = Math.min(...prices);
+                    const maxP = Math.max(...prices);
+                    const rangeP = maxP - minP || 1;
+                    const isUp = prices[prices.length - 1] >= prices[0];
+                    const lineColor = isUp ? '#16a34a' : '#dc2626';
+                    const fillColor = isUp ? '#dcfce766' : '#fee2e266';
+
+                    const pX = (i: number) => cx1 + (i / Math.max(prices.length - 1, 1)) * CW;
+                    const pY = (p: number) => cy2 - ((p - minP) / rangeP) * CH;
+                    const pricePoints = prices.map((p, i) => `${pX(i).toFixed(1)},${pY(p).toFixed(1)}`).join(' ');
+                    const areaPoints = `${cx1},${cy2} ${pricePoints} ${cx2},${cy2}`;
+
+                    // Y ticks cours (4 niveaux)
+                    const yPriceTicks = [0, 0.33, 0.66, 1].map(t => minP + t * rangeP);
+
+                    // Données graphe variations
+                    const variations = filtered.map(e => e.day_change_percent);
+                    const maxAbs = Math.max(...variations.map(Math.abs), 0.01);
+                    const midY = (cy1 + cy2) / 2;
+                    const barSlot = CW / Math.max(variations.length, 1);
+                    const barW = Math.max(barSlot - 1.5, 1);
+
+                    // Y ticks variations (5 niveaux : -max, -mid, 0, +mid, +max)
+                    const yVarTicks = [-maxAbs, -maxAbs / 2, 0, maxAbs / 2, maxAbs];
+                    const vY = (v: number) => midY - (v / maxAbs) * (CH / 2);
+
+                    // X ticks (max 5 dates réparties)
+                    const xTickCount = Math.min(filtered.length, 5);
+                    const xTickIndices = xTickCount <= 1
+                      ? [0]
+                      : Array.from({ length: xTickCount }, (_, i) => Math.round(i * (filtered.length - 1) / (xTickCount - 1)));
+                    const fmtDate = (d: string) => new Date(d + 'T00:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+
+                    return (
+                      <>
+                        <div className="flex items-center justify-between mt-5 mb-3">
+                          <span className="text-sm font-medium text-gray-600">Graphiques</span>
+                          <div className="flex gap-1">
+                            {(['1W', '1M', 'ALL'] as const).map(p => (
+                              <button
+                                key={p}
+                                onClick={() => setStatsPeriod(p)}
+                                className={`px-2.5 py-1 text-xs font-medium rounded ${statsPeriod === p ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                              >
+                                {p === '1W' ? '1 sem' : p === '1M' ? '1 mois' : 'Tout'}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {filtered.length < 2 ? (
+                          <div className="text-center py-4 text-xs text-gray-400">Données insuffisantes pour cette période</div>
+                        ) : (
+                          <>
+                            {/* Haut / Bas de la période */}
+                            {(() => {
+                              const periodLabel = statsPeriod === '1W' ? '1 sem' : statsPeriod === '1M' ? '1 mois' : 'Tout';
+                              const highEntry = filtered.reduce((a, b) => b.close_price > a.close_price ? b : a);
+                              const lowEntry  = filtered.reduce((a, b) => b.close_price < a.close_price ? b : a);
+                              const fmt = (p: number) => p.toLocaleString('fr-FR', { style: 'currency', currency: stats!.currency || 'USD' });
+                              const fmtD = (d: string) => new Date(d + 'T00:00:00').toLocaleDateString('fr-FR');
+                              return (
+                                <div className="flex gap-3 mb-4">
+                                  <div className="flex-1 bg-green-50 border border-green-100 rounded-lg p-2.5">
+                                    <div className="text-xs text-green-600 font-medium mb-0.5">Plus haut — {periodLabel}</div>
+                                    <div className="font-bold text-green-700">{fmt(highEntry.close_price)}</div>
+                                    <div className="text-xs text-green-500 mt-0.5">{fmtD(highEntry.date)}</div>
+                                  </div>
+                                  <div className="flex-1 bg-red-50 border border-red-100 rounded-lg p-2.5">
+                                    <div className="text-xs text-red-600 font-medium mb-0.5">Plus bas — {periodLabel}</div>
+                                    <div className="font-bold text-red-700">{fmt(lowEntry.close_price)}</div>
+                                    <div className="text-xs text-red-500 mt-0.5">{fmtD(lowEntry.date)}</div>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Graphe 1 : Cours */}
+                            <div className="mb-5">
+                              <p className="text-xs font-medium text-gray-500 mb-1">Cours ({stats.currency || 'USD'})</p>
+                              <div className="bg-gray-50 rounded-lg p-1">
+                                <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+                                  {/* Grille horizontale + labels Y */}
+                                  {yPriceTicks.map((tick, i) => {
+                                    const y = pY(tick);
+                                    const label = tick >= 1000
+                                      ? tick.toFixed(0)
+                                      : tick >= 100
+                                        ? tick.toFixed(1)
+                                        : tick.toFixed(2);
+                                    return (
+                                      <g key={i}>
+                                        <line x1={cx1} y1={y.toFixed(1)} x2={cx2} y2={y.toFixed(1)} stroke="#e5e7eb" strokeWidth="0.6" strokeDasharray="3,2" />
+                                        <text x={(cx1 - 3).toFixed(1)} y={(y + 3).toFixed(1)} textAnchor="end" fontSize="7.5" fill="#9ca3af">{label}</text>
+                                      </g>
+                                    );
+                                  })}
+                                  {/* Bordure zone graphe */}
+                                  <rect x={cx1} y={cy1} width={CW} height={CH} fill="none" stroke="#e5e7eb" strokeWidth="0.5" />
+                                  {/* Aire + ligne cours */}
+                                  <polygon points={areaPoints} fill={fillColor} />
+                                  <polyline points={pricePoints} fill="none" stroke={lineColor} strokeWidth="1.5" strokeLinejoin="round" />
+                                  {/* Ticks X + labels */}
+                                  {xTickIndices.map((idx) => {
+                                    const x = pX(idx);
+                                    return (
+                                      <g key={idx}>
+                                        <line x1={x.toFixed(1)} y1={cy2} x2={x.toFixed(1)} y2={(cy2 + 3).toFixed(1)} stroke="#9ca3af" strokeWidth="0.8" />
+                                        <text x={x.toFixed(1)} y={(cy2 + 13).toFixed(1)} textAnchor="middle" fontSize="7.5" fill="#9ca3af">{fmtDate(filtered[idx].date)}</text>
+                                      </g>
+                                    );
+                                  })}
+                                </svg>
+                              </div>
+                            </div>
+
+                            {/* Graphe 2 : Variations */}
+                            <div>
+                              <p className="text-xs font-medium text-gray-500 mb-1">Variation jour à jour (%)</p>
+                              <div className="bg-gray-50 rounded-lg p-1">
+                                <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+                                  {/* Grille horizontale + labels Y */}
+                                  {yVarTicks.map((tick, i) => {
+                                    const y = vY(tick);
+                                    const label = (tick >= 0 ? '+' : '') + tick.toFixed(1) + '%';
+                                    return (
+                                      <g key={i}>
+                                        <line x1={cx1} y1={y.toFixed(1)} x2={cx2} y2={y.toFixed(1)} stroke={tick === 0 ? '#9ca3af' : '#e5e7eb'} strokeWidth={tick === 0 ? '0.8' : '0.6'} strokeDasharray={tick === 0 ? undefined : '3,2'} />
+                                        <text x={(cx1 - 3).toFixed(1)} y={(y + 3).toFixed(1)} textAnchor="end" fontSize="7.5" fill="#9ca3af">{label}</text>
+                                      </g>
+                                    );
+                                  })}
+                                  {/* Bordure zone graphe */}
+                                  <rect x={cx1} y={cy1} width={CW} height={CH} fill="none" stroke="#e5e7eb" strokeWidth="0.5" />
+                                  {/* Barres */}
+                                  {variations.map((v, i) => {
+                                    const x = cx1 + i * barSlot + (barSlot - barW) / 2;
+                                    const barH = Math.abs(v) / maxAbs * (CH / 2);
+                                    const y = v >= 0 ? midY - barH : midY;
+                                    return (
+                                      <rect key={i} x={x.toFixed(1)} y={y.toFixed(1)} width={barW.toFixed(1)} height={Math.max(barH, 0.5).toFixed(1)} fill={v >= 0 ? '#16a34a' : '#dc2626'} rx="0.5" />
+                                    );
+                                  })}
+                                  {/* Ticks X + labels */}
+                                  {xTickIndices.map((idx) => {
+                                    const x = cx1 + idx * barSlot + barSlot / 2;
+                                    return (
+                                      <g key={idx}>
+                                        <line x1={x.toFixed(1)} y1={cy2} x2={x.toFixed(1)} y2={(cy2 + 3).toFixed(1)} stroke="#9ca3af" strokeWidth="0.8" />
+                                        <text x={x.toFixed(1)} y={(cy2 + 13).toFixed(1)} textAnchor="middle" fontSize="7.5" fill="#9ca3af">{fmtDate(filtered[idx].date)}</text>
+                                      </g>
+                                    );
+                                  })}
+                                </svg>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </>
+                    );
+                  })()}
                 </>
               )}
             </div>
@@ -1377,7 +2087,7 @@ function App() {
                   </span>
                 )}
                 <button
-                  onClick={fetchRecommendations}
+                  onClick={() => fetchRecommendations()}
                   disabled={recommendationsLoading}
                   className="px-3 py-1.5 bg-violet-600 text-white text-sm rounded-md hover:bg-violet-700 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-violet-500 flex items-center gap-1"
                   title="Recommandations basées sur les moyennes mobiles"
@@ -1476,15 +2186,22 @@ function App() {
                       {quotesLoading && !quotes[stock.symbol] ? (
                         <span className="text-gray-400">...</span>
                       ) : quotes[stock.symbol] ? (
-                        <span className="inline-flex items-center gap-2">
-                          <span className="font-semibold">
-                            {quotes[stock.symbol]!.price.toLocaleString('fr-FR', { style: 'currency', currency: quotes[stock.symbol]!.currency })}
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="inline-flex items-center gap-2">
+                            <span className="font-semibold">
+                              {quotes[stock.symbol]!.price.toLocaleString('fr-FR', { style: 'currency', currency: quotes[stock.symbol]!.currency })}
+                            </span>
+                            <span className={`${quotes[stock.symbol]!.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {quotes[stock.symbol]!.change >= 0 ? '+' : ''}
+                              {quotes[stock.symbol]!.changePercent.toFixed(2)}%
+                            </span>
                           </span>
-                          <span className={`${quotes[stock.symbol]!.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {quotes[stock.symbol]!.change >= 0 ? '+' : ''}
-                            {quotes[stock.symbol]!.changePercent.toFixed(2)}%
-                          </span>
-                        </span>
+                          {quotes[stock.symbol]!.volume !== null && (
+                            <span className="text-xs text-gray-400">
+                              Vol.&nbsp;{formatVolume(quotes[stock.symbol]!.volume!)}
+                            </span>
+                          )}
+                        </div>
                       ) : (
                         <span className="text-gray-400">N/A</span>
                       )}
@@ -1552,7 +2269,13 @@ function App() {
 
                       <button
                         onClick={() => openPositions(stock.symbol)}
-                        className="text-emerald-600 hover:text-emerald-800 font-medium inline-flex items-center"
+                        className={`font-medium inline-flex items-center ${
+                          allPositions.some(p => p.symbol === stock.symbol && p.type === 'real')
+                            ? 'text-red-500 hover:text-red-700'
+                            : allPositions.some(p => p.symbol === stock.symbol && p.type === 'fictive')
+                              ? 'text-blue-500 hover:text-blue-700'
+                              : 'text-gray-400 hover:text-gray-600'
+                        }`}
                         title="Positions / Portefeuille"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1634,6 +2357,7 @@ function App() {
                                 <th className="py-1 text-right">Ouverture</th>
                                 <th className="py-1 text-right">Clôture</th>
                                 <th className="py-1 text-right">Variation jour</th>
+                                <th className="py-1 text-right">Volume</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200">
@@ -1650,6 +2374,9 @@ function App() {
                                   </td>
                                   <td className={`py-1 text-right font-bold ${entry.day_change_percent >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                                     {entry.day_change_percent >= 0 ? '+' : ''}{entry.day_change_percent.toFixed(2)}%
+                                  </td>
+                                  <td className="py-1 text-right text-gray-500">
+                                    {entry.volume !== null && entry.volume !== undefined ? formatVolume(entry.volume) : '—'}
                                   </td>
                                 </tr>
                               ))}

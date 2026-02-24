@@ -11,7 +11,8 @@
       "Bash(npm test:*)",
       "Bash(curl:*)",
       "mcp__ide__getDiagnostics",
-      "Bash(sqlite3:*)"
+      "Bash(sqlite3:*)",
+      "Bash(python3:*)"
     ]
   }
 }

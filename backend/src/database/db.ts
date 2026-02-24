@@ -77,4 +77,29 @@ try {
   db.exec('ALTER TABLE stocks ADD COLUMN important INTEGER DEFAULT 0');
 }
 
+// Migration : ajouter la colonne volume à daily_history si elle n'existe pas
+try {
+  db.prepare('SELECT volume FROM daily_history LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE daily_history ADD COLUMN volume INTEGER');
+}
+
+// Table historique des signaux journaliers
+db.exec(`
+  CREATE TABLE IF NOT EXISTS signal_history (
+    symbol        TEXT NOT NULL,
+    date          TEXT NOT NULL,
+    signal        TEXT NOT NULL,
+    calculated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, date)
+  )
+`);
+
+// Migration : ajouter calculated_at à signal_history si elle n'existe pas
+try {
+  db.prepare('SELECT calculated_at FROM signal_history LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE signal_history ADD COLUMN calculated_at DATETIME');
+}
+
 export default db;
